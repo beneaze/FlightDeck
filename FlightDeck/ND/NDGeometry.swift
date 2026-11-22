@@ -1,58 +1,98 @@
 import CoreLocation
 import SwiftUI
 
-/// Geometry of the A320 ND in ARC mode, in the display's own coordinate system.
+/// Layout of the A320-style ND in ARC mode, in our own 1000 × 1000 unit
+/// canvas.
 ///
-/// The real ND is authored as a 768 × 768 SVG. The compass rose rotates about
-/// (384, 620), the aircraft symbol sits just below it at (384, 626), and
-/// 498 px of map represent the selected range. Drawing in those units — then
-/// scaling the whole canvas once — keeps every element in the exact
-/// relationship the real display has.
-///
-/// Coordinates follow the FlyByWire A32NX ND, which is the reference
-/// implementation for this instrument.
+/// Everything hangs off a handful of design parameters: where the compass
+/// rose is centred, how big its ring is, and how far the aircraft symbol sits
+/// below the rose centre. Graduations, labels, the map circle, the range
+/// arcs and the band that has to fit on screen are all derived from those, so
+/// the display keeps its proportions when one of them is changed. The whole
+/// canvas is scaled once to fit the screen.
 enum ND {
 
-    /// Side of the square display.
-    static let canvas: CGFloat = 768
+    // MARK: Design parameters
 
-    /// Centre of the compass rose and of every range arc.
-    static let center = CGPoint(x: 384, y: 620)
+    /// Side of the square canvas.
+    static let canvas: CGFloat = 1000
 
-    /// The aircraft symbol / map origin — six units below the rose centre,
-    /// exactly as on the reference display.
-    static let planeCenter = CGPoint(x: 384, y: 626)
+    /// Centre of the compass rose and of every range arc. Low on the canvas:
+    /// in ARC mode the aircraft looks forward across most of the display.
+    static let center = CGPoint(x: 500, y: 810)
 
     /// Radius of the heading ring.
-    static let ringRadius: CGFloat = 492
+    static let ringRadius: CGFloat = 640
 
-    /// Pixels representing the full selected range on the map.
-    static let mapRadius: CGFloat = 498
+    /// How far the aircraft symbol sits below the rose centre.
+    static let planeOffset: CGFloat = 8
 
-    // MARK: Type sizes (px in canvas units, from the A32NX style sheet)
+    /// Graduation lengths, standing outward of the ring.
+    static let majorTick: CGFloat = 38
+    static let minorTick: CGFloat = 20
+    /// Gap between the end of a major graduation and its label.
+    static let labelGap: CGFloat = 10
 
-    static let fontLarge: CGFloat = 32.5
-    static let fontIntermediate: CGFloat = 27.5
-    static let fontSmall: CGFloat = 25
-    static let fontSmallest: CGFloat = 22.5
+    /// Rose labels: large at the cardinal-ish 30° marks, small otherwise.
+    static let roseLabelLarge: CGFloat = 44
+    static let roseLabelSmall: CGFloat = 29
+
+    /// Half-length of the lubber line, centred on the top of the ring.
+    static let lubberHalfLength: CGFloat = 26
+
+    /// Stroke widths.
+    static let lineWidth: CGFloat = 2.6
+    static let routeWidth: CGFloat = 2.3
+    static let symbolWidth: CGFloat = 6.5
+
+    // MARK: Type sizes
+
+    static let fontLarge: CGFloat = 42
+    static let fontIntermediate: CGFloat = 36
+    static let fontSmall: CGFloat = 32
+    static let fontSmallest: CGFloat = 29
     /// Waypoint idents on the map layer.
-    static let fontMap: CGFloat = 21
+    static let fontMap: CGFloat = 27
+
+    /// Horizontal advance of one character of the monospaced display face,
+    /// for laying out the data blocks column by column.
+    static func advance(_ size: CGFloat) -> CGFloat { size * 0.6 }
 
     // MARK: Derived geometry
 
-    /// The reference display is square; a phone's ND area rarely is. The
-    /// sector therefore fills the available width — the ring reaching the
-    /// sides at up to `maxHalfSpanDeg` either side of the lubber line — and
-    /// the vertical band from the rose's top labels down to just below the
-    /// aircraft (`bandTop`…`bandBottom`) is what must fit the height.
-    static let maxHalfSpanDeg = 60.0
-    static let bandTop: CGFloat = 55
-    static let bandBottom: CGFloat = 685
+    /// The aircraft symbol / map origin.
+    static var planeCenter: CGPoint { CGPoint(x: center.x, y: center.y + planeOffset) }
 
-    /// The ring itself is drawn a little past the last graduation.
+    /// Distance representing the full selected range. Measured from the
+    /// aircraft, so the full range lands exactly on the ring dead ahead.
+    static var mapRadius: CGFloat { ringRadius + planeOffset }
+
+    /// Radius at which the rose labels are centred.
+    static var labelRadius: CGFloat { ringRadius + majorTick + labelGap + roseLabelLarge / 2 }
+
+    /// The canvas is square; a phone's ND area rarely is. The sector
+    /// therefore fills the available width — the ring reaching the sides at
+    /// up to `maxHalfSpanDeg` either side of the lubber line — and the band
+    /// from the top of the rose labels to just below the aircraft
+    /// (`bandTop`…`bandBottom`) is what must fit the height.
+    static let maxHalfSpanDeg = 60.0
+    static var bandTop: CGFloat { center.y - labelRadius - roseLabelLarge * 0.7 }
+    static var bandBottom: CGFloat { planeCenter.y + Airplane.tail + 20 }
+
+    /// The ring is drawn a little past the last graduation.
     static let ringSpanDeg = 75.0
     /// Graduations and labels stop here.
     static let tickSpanDeg = 70.0
+
+    /// Aircraft symbol proportions, from its centre (where the wings cross
+    /// the fuselage).
+    enum Airplane {
+        static let wingHalfSpan: CGFloat = 54
+        static let nose: CGFloat = 38
+        static let tail: CGFloat = 52
+        static let tailplaneAt: CGFloat = 40
+        static let tailplaneHalfSpan: CGFloat = 15
+    }
 
     /// Point at a bearing (degrees from straight up) and radius from ``center``.
     static func point(bearingDeg: Double, radius: CGFloat) -> CGPoint {
@@ -62,58 +102,58 @@ enum ND {
     }
 
     /// The ARC-mode map region: everything under the heading ring's arc,
-    /// stretched sideways and down to whatever the display edges are.
+    /// stretched sideways and down to whatever the display edges are. The
+    /// arc is followed to where it leaves the square canvas.
     static func mapClip(in bounds: CGRect) -> Path {
+        let halfWidth = canvas / 2
+        let sweep = asin(halfWidth / ringRadius) * 180 / .pi
+        let sideY = center.y - (ringRadius * ringRadius - halfWidth * halfWidth).squareRoot()
+
         var p = Path()
-        p.move(to: CGPoint(x: bounds.minX, y: 312))
-        // The ring arc from (0, 312) over the top to (768, 312).
-        let sweep = atan2(384.0, 308.0) * 180 / .pi
+        p.move(to: CGPoint(x: bounds.minX, y: sideY))
         for step in stride(from: -sweep, through: sweep, by: 1.5) {
             p.addLine(to: point(bearingDeg: step, radius: ringRadius))
         }
-        p.addLine(to: CGPoint(x: 768, y: 312))
-        p.addLine(to: CGPoint(x: bounds.maxX, y: 312))
+        p.addLine(to: point(bearingDeg: sweep, radius: ringRadius))
+        p.addLine(to: CGPoint(x: bounds.maxX, y: sideY))
         p.addLine(to: CGPoint(x: bounds.maxX, y: bounds.maxY))
         p.addLine(to: CGPoint(x: bounds.minX, y: bounds.maxY))
         p.closeSubpath()
         return p
     }
 
-    /// The dashed inner range arcs at ¼, ½ and ¾ of the selected range. Each
-    /// is a full circle cut by a wedge-shaped clip, so the dashes vanish in a
-    /// V around the aircraft instead of ending abruptly. The wedge is defined
-    /// by the V's bottom and the slopes of its arms (from the reference
-    /// display's fixed clip polygons), extended out to the display edges.
-    struct RangeArc {
-        let radius: CGFloat
-        let dash: [CGFloat]
-        let dashPhase: CGFloat
-        let apexY: CGFloat
-        let leftSlope: CGFloat
-        let rightSlope: CGFloat
+    // MARK: Range arcs
 
-        func clip(in bounds: CGRect) -> Path {
-            var p = Path()
-            p.move(to: CGPoint(x: bounds.minX,
-                               y: apexY - leftSlope * (ND.center.x - bounds.minX)))
-            p.addLine(to: CGPoint(x: ND.center.x, y: apexY))
-            p.addLine(to: CGPoint(x: bounds.maxX,
-                                  y: apexY - rightSlope * (bounds.maxX - ND.center.x)))
-            p.addLine(to: CGPoint(x: bounds.maxX, y: bounds.minY))
-            p.addLine(to: CGPoint(x: bounds.minX, y: bounds.minY))
-            p.closeSubpath()
-            return p
-        }
+    /// The dashed inner range arcs sit at these fractions of the selected
+    /// range.
+    static let rangeArcFractions: [CGFloat] = [0.25, 0.5, 0.75]
+    static let rangeArcDash: [CGFloat] = [20, 13]
+
+    /// The arcs stop short of the aircraft in a V: one wedge, opening upward
+    /// from a point just below the aircraft with its arms rising at this
+    /// angle, hides them all. Small arcs therefore end level with the rose
+    /// centre and large ones progressively higher.
+    static var rangeArcGapApex: CGPoint { CGPoint(x: center.x, y: planeCenter.y + 28) }
+    static let rangeArcGapArmDeg = 12.5
+
+    /// Everything above the V, out to the display edges.
+    static func rangeArcClip(in bounds: CGRect) -> Path {
+        let apex = rangeArcGapApex
+        let slope = CGFloat(tan(rangeArcGapArmDeg * .pi / 180))
+        var p = Path()
+        p.move(to: CGPoint(x: bounds.minX, y: apex.y - slope * (apex.x - bounds.minX)))
+        p.addLine(to: apex)
+        p.addLine(to: CGPoint(x: bounds.maxX, y: apex.y - slope * (bounds.maxX - apex.x)))
+        p.addLine(to: CGPoint(x: bounds.maxX, y: bounds.minY))
+        p.addLine(to: CGPoint(x: bounds.minX, y: bounds.minY))
+        p.closeSubpath()
+        return p
     }
 
-    static let rangeArcs: [RangeArc] = [
-        RangeArc(radius: 369, dash: [15, 10.5], dashPhase: 15,
-                 apexY: 709, leftSlope: 0.3776, rightSlope: 0.3776),
-        RangeArc(radius: 246, dash: [15, 10], dashPhase: -6,
-                 apexY: 687, leftSlope: 0.4036, rightSlope: 0.3802),
-        RangeArc(radius: 123, dash: [15, 10], dashPhase: -4.2,
-                 apexY: 664, leftSlope: 0.3776, rightSlope: 0.2240),
-    ]
+    /// Range labels sit on their arc at this bearing either side of the
+    /// lubber line, inset horizontally into the arc.
+    static let rangeLabelBearingDeg = 66.0
+    static let rangeLabelInset: CGFloat = 20
 }
 
 /// Maps geographic positions onto the ND's ARC-mode canvas.

@@ -9,9 +9,8 @@ enum EFIS {
 
     // MARK: Colour code
     //
-    // Exact display values, matching the A320 EFIS definitions used by the
-    // FlyByWire A32NX. These are saturated on purpose — an EFIS is a
-    // self-luminous instrument, not a document.
+    // Values chosen to read as the A320's colour code. They are saturated on
+    // purpose — an EFIS is a self-luminous instrument, not a document.
 
     /// Engaged modes, current-state readouts, the flight plan.
     static let green   = Color(red: 0.00, green: 1.00, blue: 0.00)   // #00ff00
@@ -19,7 +18,7 @@ enum EFIS {
     static let cyan    = Color(red: 0.00, green: 1.00, blue: 1.00)   // #00ffff
     /// FMS-managed targets, ILS data, deviation diamonds.
     static let magenta = Color(red: 1.00, green: 0.58, blue: 1.00)   // #ff94ff
-    /// Cautions — VLS, low-energy, armed limits.
+    /// Cautions — low-energy, armed limits, degraded data.
     static let amber   = Color(red: 0.90, green: 0.50, blue: 0.00)   // #e68000
     /// Fixed aircraft symbol, lubber lines, the altitude readout box.
     static let yellow  = Color(red: 1.00, green: 1.00, blue: 0.00)   // #ffff00

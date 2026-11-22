@@ -5,12 +5,14 @@ import CoreLocation
 /// the compass rose arcs across the top, and the flight plan runs away from
 /// the aircraft between dashed range arcs.
 ///
-/// Like the PFD, the whole instrument is drawn into one canvas in the
-/// display's native 768-unit coordinate system (see ``ND``), then scaled to
-/// fit. Geometry, colours and type sizes follow the FlyByWire A32NX ND.
+/// Like the PFD, the whole instrument is drawn into one canvas in our own
+/// 1000-unit layout (see ``ND``), then scaled to fit, so its proportions
+/// never drift with the screen size.
 struct NDView: View {
     @EnvironmentObject private var flightData: FlightDataModel
     @EnvironmentObject private var routePlanner: RoutePlanner
+    @EnvironmentObject private var packs: FlightPackStore
+    @StateObject private var terrain = NDTerrainLayer()
 
     @State private var rangeIndex = AircraftProfile.a320.ndDefaultRangeIndex
     /// Non-zero while the display is "recomputing" after a range change — the
@@ -21,6 +23,20 @@ struct NDView: View {
 
     private var rangeNm: Double { profile.ndRangesNm[rangeIndex] }
 
+    /// The route's ground profile from the aircraft out to the selected
+    /// range, in nautical miles ahead.
+    private var routeElevationAhead: [(distanceNm: Double, elevationFt: Double)] {
+        if isFlying {
+            // In flight: the ground along the current track, from the pack.
+            guard let store = packs.activeTerrain, let location = flightData.location else { return [] }
+            return store.profile(from: location.coordinate, trackDeg: flightData.trackDeg,
+                                 spanNm: rangeNm, samples: 64)
+        }
+        guard let profile = routePlanner.elevationProfile else { return [] }
+        return profile.ahead(fromMeters: routePlanner.alongTrackMeters, spanMeters: rangeNm * 1852)
+            .map { (distanceNm: $0.distanceMeters / 1852, elevationFt: $0.elevationFt) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             display
@@ -28,13 +44,31 @@ struct NDView: View {
                                 selectedAltitudeFt: flightData.selectedAltitudeFt,
                                 flightPathAngleDeg: flightData.flightPathAngleDeg,
                                 rangeNm: rangeNm,
+                                routeElevation: routeElevationAhead,
+                                elevationStatus: elevationStatus,
                                 destinationName: routePlanner.destination?.name,
                                 destinationDistanceNm: routePlanner.distanceToGoNm(
-                                    from: flightData.location))
-                .frame(height: 92)
+                                    from: flightData.location),
+                                showsGround: isFlying)
+                .frame(height: 104)
             controlBar
         }
         .background(EFIS.background)
+        .onReceive(flightData.$location) { _ in updateTerrain() }
+        .onChange(of: rangeIndex) { updateTerrain() }
+    }
+
+    private var isFlying: Bool { routePlanner.transportMode == .plane }
+
+    private var elevationStatus: String? {
+        if isFlying { return packs.activeTerrain == nil ? "NO TERRAIN" : nil }
+        return routePlanner.destination == nil ? nil : routePlanner.elevationStatus
+    }
+
+    private func updateTerrain() {
+        terrain.update(store: isFlying ? packs.activeTerrain : nil, location: flightData.location,
+                       upDeg: flightData.headingDeg, rangeNm: rangeNm,
+                       altitudeFt: flightData.altitudeFt)
     }
 
     // MARK: Display
@@ -85,7 +119,7 @@ struct NDView: View {
             drawToWaypoint(right)
 
             if routePlanner.destination == nil, let error = routePlanner.errorMessage {
-                text(sector, error, x: ND.center.x, y: bounds.maxY - 12,
+                text(sector, error, x: ND.center.x, y: bounds.maxY - ND.fontSmallest,
                      size: ND.fontSmallest, EFIS.amber, anchor: .center)
             }
         }
@@ -104,11 +138,11 @@ struct NDView: View {
             let p = ND.point(bearingDeg: step, radius: ND.ringRadius)
             step == -ND.ringSpanDeg ? ring.move(to: p) : ring.addLine(to: p)
         }
-        ctx.stroke(ring, with: .color(.white), lineWidth: 2)
+        ctx.stroke(ring, with: .color(.white), lineWidth: ND.lineWidth)
 
-        // Graduations every 5° stand outward of the ring: 29 px at 10°
-        // multiples, 15 px between. Labels rotate with the rose, in the large
-        // face every 30° and the small face otherwise.
+        // A graduation every 5°, long at the tens. The tens carry their
+        // heading in tens of degrees, rotating with the rose; every third one
+        // (the 30° marks) is set large.
         for deg in stride(from: 0, to: 360, by: 5) {
             let diff = angularDifference(Double(deg), heading)
             guard abs(diff) <= ND.tickSpanDeg else { continue }
@@ -119,41 +153,40 @@ struct NDView: View {
 
             let major = deg % 10 == 0
             tick.line(from: CGPoint(x: 0, y: -ND.ringRadius),
-                      to: CGPoint(x: 0, y: -ND.ringRadius - (major ? 29 : 15)),
-                      .white, width: 2)
+                      to: CGPoint(x: 0, y: -ND.ringRadius - (major ? ND.majorTick : ND.minorTick)),
+                      .white, width: ND.lineWidth)
 
             if major {
-                let size: CGFloat = deg % 30 == 0 ? 34 : 22
-                tick.digits("\(deg / 10)",
-                            at: CGPoint(x: 0, y: -(529 + size * 0.36)),
+                let size = deg % 30 == 0 ? ND.roseLabelLarge : ND.roseLabelSmall
+                tick.digits("\(deg / 10)", at: CGPoint(x: 0, y: -ND.labelRadius),
                             size: size, .white)
             }
         }
     }
 
     private func drawRangeArcs(_ context: GraphicsContext, _ bounds: CGRect) {
-        for arc in ND.rangeArcs {
-            var ctx = context
-            ctx.clip(to: arc.clip(in: bounds))
-            let circle = Path(ellipseIn: CGRect(x: ND.center.x - arc.radius,
-                                                y: ND.center.y - arc.radius,
-                                                width: arc.radius * 2,
-                                                height: arc.radius * 2))
+        var ctx = context
+        ctx.clip(to: ND.rangeArcClip(in: bounds))
+        for fraction in ND.rangeArcFractions {
+            let radius = ND.ringRadius * fraction
+            let circle = Path(ellipseIn: CGRect(x: ND.center.x - radius, y: ND.center.y - radius,
+                                                width: radius * 2, height: radius * 2))
             ctx.stroke(circle, with: .color(.white),
-                       style: StrokeStyle(lineWidth: 2, dash: arc.dash,
-                                          dashPhase: arc.dashPhase))
+                       style: StrokeStyle(lineWidth: ND.lineWidth, dash: ND.rangeArcDash))
         }
 
         // The half and three-quarter arcs carry their distance at both ends.
-        let threeQuarter = rangeLabel(rangeNm * 0.75)
-        text(context, threeQuarter, x: 58, y: 482, size: ND.fontSmallest, EFIS.cyan)
-        text(context, threeQuarter, x: 709, y: 482, size: ND.fontSmallest, EFIS.cyan,
-             anchor: .trailing)
-
-        let half = rangeLabel(rangeNm * 0.5)
-        text(context, half, x: 175, y: 528, size: ND.fontSmallest, EFIS.cyan)
-        text(context, half, x: 592, y: 528, size: ND.fontSmallest, EFIS.cyan,
-             anchor: .trailing)
+        for fraction in [0.5, 0.75] {
+            let label = rangeLabel(rangeNm * fraction)
+            let left = ND.point(bearingDeg: -ND.rangeLabelBearingDeg,
+                                radius: ND.ringRadius * CGFloat(fraction))
+            let right = ND.point(bearingDeg: ND.rangeLabelBearingDeg,
+                                 radius: ND.ringRadius * CGFloat(fraction))
+            text(context, label, x: left.x + ND.rangeLabelInset, y: left.y,
+                 size: ND.fontSmallest, EFIS.cyan)
+            text(context, label, x: right.x - ND.rangeLabelInset, y: right.y,
+                 size: ND.fontSmallest, EFIS.cyan, anchor: .trailing)
+        }
     }
 
     private func rangeLabel(_ value: Double) -> String {
@@ -176,34 +209,41 @@ struct NDView: View {
         ctx.translateBy(x: ND.center.x, y: ND.center.y)
         ctx.rotate(by: .degrees(diff))
 
+        // The line stops where the lubber line begins, so the two never
+        // overlap when track and heading agree.
         var line = Path()
-        line.move(to: CGPoint(x: 0, y: 149 - ND.center.y))
+        line.move(to: CGPoint(x: 0, y: -(ND.ringRadius - ND.lubberHalfLength)))
         line.addLine(to: .zero)
         ctx.stroke(line, with: .color(EFIS.background),
-                   style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                   style: StrokeStyle(lineWidth: ND.lineWidth * 1.5, lineCap: .round))
         ctx.stroke(line, with: .color(EFIS.green),
-                   style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                   style: StrokeStyle(lineWidth: ND.lineWidth * 1.25, lineCap: .round))
 
-        // The diamond disappears once the drift angle would carry it off the
-        // visible sector.
+        // The diamond hangs from the ring, and disappears once the drift
+        // angle would carry it off the visible sector.
         guard abs(diff) <= 40 else { return }
+        let height: CGFloat = 26, halfWidth: CGFloat = 8
+        let top = -ND.ringRadius
         var diamond = Path()
-        diamond.move(to: CGPoint(x: 0, y: -492))
-        diamond.addLine(to: CGPoint(x: -6, y: -482))
-        diamond.addLine(to: CGPoint(x: 0, y: -472))
-        diamond.addLine(to: CGPoint(x: 6, y: -482))
+        diamond.move(to: CGPoint(x: 0, y: top))
+        diamond.addLine(to: CGPoint(x: -halfWidth, y: top + height / 2))
+        diamond.addLine(to: CGPoint(x: 0, y: top + height))
+        diamond.addLine(to: CGPoint(x: halfWidth, y: top + height / 2))
         diamond.closeSubpath()
         ctx.stroke(diamond, with: .color(EFIS.background),
-                   style: StrokeStyle(lineWidth: 4.5, lineJoin: .round))
+                   style: StrokeStyle(lineWidth: ND.lineWidth * 2.25, lineJoin: .round))
         ctx.stroke(diamond, with: .color(EFIS.green),
-                   style: StrokeStyle(lineWidth: 3, lineJoin: .round))
+                   style: StrokeStyle(lineWidth: ND.lineWidth * 1.5, lineJoin: .round))
     }
 
     // MARK: Map
 
+    /// Annunciations replacing the map sit in the middle of the sector.
+    private var sectorMidY: CGFloat { ND.center.y - ND.ringRadius * 0.6 }
+
     private func drawMap(_ context: GraphicsContext, _ bounds: CGRect) {
         guard let location = flightData.location else {
-            text(context, "MAP NOT AVAIL", x: 384, y: 320.6, size: ND.fontLarge,
+            text(context, "MAP NOT AVAIL", x: ND.center.x, y: sectorMidY, size: ND.fontLarge,
                  EFIS.red, anchor: .center)
             return
         }
@@ -211,7 +251,7 @@ struct NDView: View {
         // While the new scale is computed the map blanks and the annunciation
         // shows in the middle of the sector.
         guard rangeChangeCount == 0 else {
-            text(context, "RANGE CHANGE", x: 384, y: 320, size: ND.fontIntermediate,
+            text(context, "RANGE CHANGE", x: ND.center.x, y: sectorMidY, size: ND.fontIntermediate,
                  EFIS.green, anchor: .center)
             return
         }
@@ -223,6 +263,15 @@ struct NDView: View {
                            rangeNm: rangeNm, origin: location.coordinate,
                            headingDeg: flightData.headingDeg)
 
+        // In flight: terrain under everything, then the airports around.
+        if isFlying {
+            terrain.draw(in: ctx, geometry: g, clipCenter: ND.center, clipRadius: ND.ringRadius)
+            let planned = Set(routePlanner.flightPlan.map { [$0.origin.icao, $0.destination.icao] } ?? [])
+            for airport in g.airportsInView(excluding: planned) {
+                drawAirportSymbol(ctx, at: g.project(airport.coordinate), ident: airport.icao)
+            }
+        }
+
         // The not-yet-flown part of the plan; sequenced legs disappear behind.
         let coordinates = routePlanner.remainingRouteCoordinates(maximumCount: 400)
         if coordinates.count > 1 {
@@ -231,15 +280,15 @@ struct NDView: View {
                 let p = g.project(coordinate)
                 index == 0 ? path.move(to: p) : path.addLine(to: p)
             }
-            ctx.stroke(path, with: .color(EFIS.green), lineWidth: 1.75)
+            ctx.stroke(path, with: .color(EFIS.green), lineWidth: ND.routeWidth)
         }
 
         // With no computed route, the direct-to leg is the active flight plan.
-        if routePlanner.route == nil, let waypoint = routePlanner.waypoints.first {
+        if routePlanner.routeCoordinates.count < 2, let waypoint = routePlanner.waypoints.first {
             var leg = Path()
             leg.move(to: g.apex)
             leg.addLine(to: g.project(waypoint.coordinate))
-            ctx.stroke(leg, with: .color(EFIS.green), lineWidth: 1.75)
+            ctx.stroke(leg, with: .color(EFIS.green), lineWidth: ND.routeWidth)
         }
 
         // Waypoints from the TO waypoint onward: the active one white, the
@@ -253,57 +302,91 @@ struct NDView: View {
         }
     }
 
+    /// An airport: a magenta star of four short bars, its ident beside it.
+    private func drawAirportSymbol(_ context: GraphicsContext, at: CGPoint, ident: String) {
+        let r: CGFloat = 11
+        var star = Path()
+        for deg in stride(from: 0.0, to: 180, by: 45) {
+            let a = deg * .pi / 180
+            star.move(to: CGPoint(x: at.x - r * CGFloat(sin(a)), y: at.y - r * CGFloat(cos(a))))
+            star.addLine(to: CGPoint(x: at.x + r * CGFloat(sin(a)), y: at.y + r * CGFloat(cos(a))))
+        }
+        context.stroke(star, with: .color(EFIS.magenta), lineWidth: ND.routeWidth * 0.8)
+        text(context, ident, x: at.x + 1.6 * r, y: at.y + 1.2 * r, size: ND.fontMap, EFIS.magenta)
+    }
+
     private func drawWaypointSymbol(_ context: GraphicsContext, at: CGPoint,
                                     ident: String, color: Color) {
-        let half: CGFloat = 4.5 * 2.0.squareRoot()
+        let half: CGFloat = 8.5
         var diamond = Path()
         diamond.move(to: CGPoint(x: at.x, y: at.y - half))
         diamond.addLine(to: CGPoint(x: at.x + half, y: at.y))
         diamond.addLine(to: CGPoint(x: at.x, y: at.y + half))
         diamond.addLine(to: CGPoint(x: at.x - half, y: at.y))
         diamond.closeSubpath()
-        context.stroke(diamond, with: .color(EFIS.background), lineWidth: 3.25)
-        context.stroke(diamond, with: .color(color), lineWidth: 1.75)
-        text(context, ident, x: at.x + 15, y: at.y + 17, size: ND.fontMap, color)
+        context.stroke(diamond, with: .color(EFIS.background), lineWidth: ND.routeWidth * 1.85)
+        context.stroke(diamond, with: .color(color), lineWidth: ND.routeWidth)
+        // Ident below and to the right of the symbol.
+        text(context, ident, x: at.x + 2.3 * half, y: at.y + 1.5 * half, size: ND.fontMap, color)
     }
 
     // MARK: Aircraft symbol
 
     private func drawAirplane(_ context: GraphicsContext) {
         // Wings, fuselage and tailplane as three strokes of one path.
+        let c = ND.planeCenter
+        typealias A = ND.Airplane
         var plane = Path()
-        plane.move(to: CGPoint(x: 343, y: 626))
-        plane.addLine(to: CGPoint(x: 425, y: 626))
-        plane.move(to: CGPoint(x: 384, y: 596.5))
-        plane.addLine(to: CGPoint(x: 384, y: 666.75))
-        plane.move(to: CGPoint(x: 372.5, y: 657))
-        plane.addLine(to: CGPoint(x: 396, y: 657))
+        plane.move(to: CGPoint(x: c.x - A.wingHalfSpan, y: c.y))
+        plane.addLine(to: CGPoint(x: c.x + A.wingHalfSpan, y: c.y))
+        plane.move(to: CGPoint(x: c.x, y: c.y - A.nose))
+        plane.addLine(to: CGPoint(x: c.x, y: c.y + A.tail))
+        plane.move(to: CGPoint(x: c.x - A.tailplaneHalfSpan, y: c.y + A.tailplaneAt))
+        plane.addLine(to: CGPoint(x: c.x + A.tailplaneHalfSpan, y: c.y + A.tailplaneAt))
         context.stroke(plane, with: .color(EFIS.background),
-                       style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                       style: StrokeStyle(lineWidth: ND.symbolWidth * 1.6, lineCap: .round))
         context.stroke(plane, with: .color(EFIS.yellow),
-                       style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                       style: StrokeStyle(lineWidth: ND.symbolWidth, lineCap: .round))
 
-        // Yellow lubber line, fixed at the top of the rose.
+        // Yellow lubber line, fixed across the top of the ring.
+        let ringTop = ND.center.y - ND.ringRadius
         var lubber = Path()
-        lubber.move(to: CGPoint(x: 384, y: 108))
-        lubber.addLine(to: CGPoint(x: 384, y: 148))
+        lubber.move(to: CGPoint(x: ND.center.x, y: ringTop - ND.lubberHalfLength))
+        lubber.addLine(to: CGPoint(x: ND.center.x, y: ringTop + ND.lubberHalfLength))
         context.stroke(lubber, with: .color(EFIS.background),
-                       style: StrokeStyle(lineWidth: 5.5, lineCap: .round))
+                       style: StrokeStyle(lineWidth: ND.symbolWidth * 1.1, lineCap: .round))
         context.stroke(lubber, with: .color(EFIS.yellow),
-                       style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                       style: StrokeStyle(lineWidth: ND.symbolWidth, lineCap: .round))
     }
 
     // MARK: Data blocks
 
-    /// Ground speed and true airspeed, top left, in the selected unit.
+    // The corner blocks are laid out in rows and in character columns of
+    // the monospaced face, from the canvas edges inward.
+
+    /// Distance of the data blocks from the canvas edges.
+    private static let blockMargin: CGFloat = 6
+    /// Centre line of data-block row `n`, counting from the top.
+    private static func row(_ n: Int) -> CGFloat { 20 + 42 * CGFloat(n) }
+
+    /// Ground speed and true airspeed, top left, in the selected unit: each a
+    /// small two-or-three-letter label followed by a three-digit value.
     private func drawSpeeds(_ context: GraphicsContext) {
         let unit = flightData.speedUnit.perKnot
-        text(context, "GS", x: 2, y: 25, size: ND.fontSmallest, .white)
+        let small = ND.advance(ND.fontSmallest), large = ND.advance(ND.fontIntermediate)
+        let y = Self.row(0)
+
+        let gsLabelX = Self.blockMargin
+        let gsValueRight = gsLabelX + 3 * small + 3 * large
+        let tasLabelX = gsValueRight + small / 2
+        let tasValueRight = tasLabelX + 4 * small + 3 * large
+
+        text(context, "GS", x: gsLabelX, y: y, size: ND.fontSmallest, .white)
         text(context, "\(Int((flightData.groundSpeedKts * unit).rounded()))",
-             x: 91, y: 25, size: ND.fontIntermediate, EFIS.green, anchor: .trailing)
-        text(context, "TAS", x: 97, y: 25, size: ND.fontSmallest, .white)
+             x: gsValueRight, y: y, size: ND.fontIntermediate, EFIS.green, anchor: .trailing)
+        text(context, "TAS", x: tasLabelX, y: y, size: ND.fontSmallest, .white)
         text(context, "\(Int((flightData.tasKts * unit).rounded()))",
-             x: 203, y: 25, size: ND.fontIntermediate, EFIS.green, anchor: .trailing)
+             x: tasValueRight, y: y, size: ND.fontIntermediate, EFIS.green, anchor: .trailing)
     }
 
     /// Wind vector under the speeds: direction/speed and an arrow pointing the
@@ -315,32 +398,43 @@ struct NDView: View {
         let directionText = direction.map { String(format: "%03d", Int($0.rounded()) % 360) } ?? "---"
         let speedText = speed.map { "\(Int(($0 * flightData.speedUnit.perKnot).rounded()))" } ?? "---"
 
-        text(context, directionText, x: 48, y: 58, size: ND.fontSmall, EFIS.green,
+        let digit = ND.advance(ND.fontSmall), small = ND.advance(ND.fontSmallest)
+        let y = Self.row(1)
+        let directionRight = Self.blockMargin + 3 * digit
+        text(context, directionText, x: directionRight, y: y, size: ND.fontSmall, EFIS.green,
              anchor: .trailing)
-        text(context, "/", x: 54, y: 57, size: ND.fontSmallest, .white)
-        text(context, speedText, x: 73, y: 58, size: ND.fontSmall, EFIS.green)
+        text(context, "/", x: directionRight, y: y, size: ND.fontSmallest, .white)
+        text(context, speedText, x: directionRight + small, y: y, size: ND.fontSmall, EFIS.green)
 
         guard let direction, let speed, speed > 2 else { return }
         var ctx = context
-        ctx.translateBy(x: 26, y: 83)
+        ctx.translateBy(x: Self.blockMargin + 1.5 * digit, y: Self.row(2))
         ctx.rotate(by: .degrees(direction - flightData.headingDeg + 180))
+        let halfLength: CGFloat = 20, headWidth: CGFloat = 8.5, headLength: CGFloat = 15.5
         var arrow = Path()
-        arrow.move(to: CGPoint(x: 0, y: 15))
-        arrow.addLine(to: CGPoint(x: 0, y: -15))
-        arrow.move(to: CGPoint(x: -6.5, y: -3))
-        arrow.addLine(to: CGPoint(x: 0, y: -15))
-        arrow.addLine(to: CGPoint(x: 6.5, y: -3))
+        arrow.move(to: CGPoint(x: 0, y: halfLength))
+        arrow.addLine(to: CGPoint(x: 0, y: -halfLength))
+        arrow.move(to: CGPoint(x: -headWidth, y: -halfLength + headLength))
+        arrow.addLine(to: CGPoint(x: 0, y: -halfLength))
+        arrow.addLine(to: CGPoint(x: headWidth, y: -halfLength + headLength))
         ctx.stroke(arrow, with: .color(EFIS.green),
-                   style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                   style: StrokeStyle(lineWidth: ND.lineWidth * 1.25, lineCap: .round))
     }
 
     /// TO-waypoint block, top right: the active waypoint's ident, bearing,
     /// along-route distance and ETA — not the final destination's.
+    /// Right-aligned on the canvas edge, column by column.
     private func drawToWaypoint(_ context: GraphicsContext) {
         guard let waypoint = routePlanner.activeWaypoint else { return }
 
-        text(context, waypoint.ident,
-             x: 677, y: 25, size: ND.fontIntermediate, .white, anchor: .trailing)
+        let edge = ND.canvas - Self.blockMargin
+        let large = ND.advance(ND.fontIntermediate), small = ND.advance(ND.fontSmallest)
+
+        // Row 0: IDENT  BRG°
+        let bearingRight = edge - large
+        let identRight = bearingRight - 4 * large
+        text(context, waypoint.ident, x: identRight, y: Self.row(0),
+             size: ND.fontIntermediate, .white, anchor: .trailing)
 
         guard let location = flightData.location else { return }
 
@@ -348,29 +442,34 @@ struct NDView: View {
                                  origin: location.coordinate, headingDeg: 0)
             .vector(to: waypoint.coordinate).bearingDeg
         text(context, String(format: "%03d", Int(bearing.rounded()) % 360),
-             x: 747, y: 25, size: ND.fontIntermediate, EFIS.green, anchor: .trailing)
-        text(context, "°", x: 763, y: 27, size: ND.fontIntermediate, EFIS.cyan,
+             x: bearingRight, y: Self.row(0), size: ND.fontIntermediate, EFIS.green,
+             anchor: .trailing)
+        text(context, "°", x: edge, y: Self.row(0), size: ND.fontIntermediate, EFIS.cyan,
              anchor: .trailing)
 
         if let distance = routePlanner.distanceNm(to: waypoint, from: location) {
+            // Row 1: distance, then NM.
+            let unitRight = edge
+            let numberRight = unitRight - 3 * small
             if distance > 20 {
-                text(context, "\(Int(distance.rounded()))", x: 729, y: 57,
+                text(context, "\(Int(distance.rounded()))", x: numberRight, y: Self.row(1),
                      size: ND.fontIntermediate, EFIS.green, anchor: .trailing)
             } else {
                 // Below 20 NM the distance gains a decimal, set in small type.
                 let parts = String(format: "%.1f", distance).split(separator: ".")
-                text(context, String(parts[0]), x: 696, y: 57,
+                let fractionLeft = numberRight - 2 * small
+                text(context, "." + String(parts[1]), x: numberRight, y: Self.row(1),
+                     size: ND.fontSmallest, EFIS.green, anchor: .trailing)
+                text(context, String(parts[0]), x: fractionLeft + small / 4, y: Self.row(1),
                      size: ND.fontIntermediate, EFIS.green, anchor: .trailing)
-                text(context, ".", x: 693, y: 57, size: ND.fontSmallest, EFIS.green)
-                text(context, String(parts[1]), x: 710, y: 57,
-                     size: ND.fontSmallest, EFIS.green)
             }
-            text(context, "NM", x: 762, y: 57, size: ND.fontSmallest, EFIS.cyan,
+            text(context, "NM", x: unitRight, y: Self.row(1), size: ND.fontSmallest, EFIS.cyan,
                  anchor: .trailing)
 
+            // Row 2: ETA.
             if let eta = utcArrival(afterNm: distance) {
-                text(context, eta, x: 762, y: 91, size: ND.fontIntermediate, EFIS.green,
-                     anchor: .trailing)
+                text(context, eta, x: edge, y: Self.row(2), size: ND.fontIntermediate,
+                     EFIS.green, anchor: .trailing)
             }
         }
     }
@@ -385,13 +484,12 @@ struct NDView: View {
         return String(format: "%02d:%02d", parts.hour ?? 0, parts.minute ?? 0)
     }
 
-    /// Draw text the way the reference SVG positions it: `y` is the baseline
-    /// and `anchor` the horizontal alignment.
+    /// Draw text with its vertical centre on `y` and `anchor` setting the
+    /// horizontal alignment.
     private func text(_ context: GraphicsContext, _ string: String,
                       x: CGFloat, y: CGFloat, size: CGFloat, _ color: Color,
                       anchor: UnitPoint = .leading) {
-        context.digits(string, at: CGPoint(x: x, y: y - size * 0.36),
-                       size: size, color, anchor: anchor)
+        context.digits(string, at: CGPoint(x: x, y: y), size: size, color, anchor: anchor)
     }
 
     // MARK: Controls
@@ -430,5 +528,6 @@ struct NDView: View {
     NDView()
         .environmentObject(FlightDataModel())
         .environmentObject(RoutePlanner())
+        .environmentObject(FlightPackStore())
         .frame(height: 480)
 }

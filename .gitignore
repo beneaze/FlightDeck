@@ -7,3 +7,6 @@ DerivedData/
 build/
 *.xcuserstate
 *.xcscmblueprint
+
+# Python
+__pycache__/

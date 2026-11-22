@@ -27,8 +27,8 @@ enum SpeedUnit: String, CaseIterable {
     }
 }
 
-/// Unit for the vertical speed scale. In m/s the scale keeps the reference
-/// display's geometry but spans ±6 m/s — car-sized — instead of ±6000 ft/min.
+/// Unit for the vertical speed scale. In m/s the scale keeps the same
+/// graduations but spans ±6 m/s — car-sized — instead of ±6000 ft/min.
 enum VerticalSpeedUnit: String, CaseIterable {
     case ms, fpm
 
@@ -36,6 +36,25 @@ enum VerticalSpeedUnit: String, CaseIterable {
         switch self {
         case .ms: return "M/S"
         case .fpm: return "FT/MIN"
+        }
+    }
+}
+
+/// Where the roll indication comes from.
+enum RollSource: String, CaseIterable {
+    /// The phone's physical bank, read off the gravity vector — an aircraft's
+    /// roll. A car corners flat, so on the road this sits at zero.
+    case tilt
+    /// The bank an aircraft would need to fly the same turn: the angle a plumb
+    /// line swings out to under the vehicle's lateral acceleration, so a
+    /// 0.3 g corner reads as a 17° bank. Tilt is still added in, so a banked
+    /// road reads the same as a flat one taken at the same cornering force.
+    case lateralAcceleration
+
+    var label: String {
+        switch self {
+        case .tilt: return "TILT"
+        case .lateralAcceleration: return "LATERAL G"
         }
     }
 }
@@ -50,6 +69,12 @@ enum VerticalSpeedUnit: String, CaseIterable {
 /// - `rollDeg`  positive = right bank.
 /// - `headingDeg` = magnetic heading while (nearly) stationary, GPS track
 ///   while moving — GPS track is far more reliable in a moving vehicle.
+///
+/// GPS reports about once a second; the motion sensors sixty times a second.
+/// Everything the displays draw is stepped at the motion rate — the speed
+/// tape and V/S needle through first-order smoothing, track,
+/// position and altitude by dead reckoning between fixes — so the picture
+/// moves continuously rather than once a second.
 @MainActor
 final class FlightDataModel: NSObject, ObservableObject {
 
@@ -60,15 +85,30 @@ final class FlightDataModel: NSObject, ObservableObject {
     @Published private(set) var trackDeg: Double = 0          // GPS ground track
     @Published private(set) var groundSpeedKts: Double = 0
     /// Speed change projected 10 s ahead — the yellow trend arrow on the tape.
-    /// Rate-limited to ±12 kt/s, as the reference display draws it.
+    /// Slew-limited, so the arrow grows and shrinks steadily rather than
+    /// jumping with each GPS fix.
     @Published private(set) var speedTrendKts: Double = 0
-    /// Trend-arrow visibility, with the reference display's hysteresis:
+    /// Trend-arrow visibility, with hysteresis so it does not flicker:
     /// shown above 2 kt of trend, hidden again only below 1 kt.
     @Published private(set) var isSpeedTrendShown = false
     @Published private(set) var altitudeFt: Double = 0
     @Published private(set) var verticalSpeedFpm: Double = 0
+    /// Present position, dead-reckoned at the motion rate between GPS fixes.
+    /// This is what the displays draw from.
     @Published private(set) var location: CLLocation?
+    /// The raw GPS fixes, about once a second, for consumers that want
+    /// measurements rather than a smooth picture — the speed-limit lookup.
+    @Published private(set) var gpsFix: CLLocation?
+    /// Lateral acceleration in the vehicle frame, in g, positive to the right.
+    @Published private(set) var lateralG: Double = 0
     @Published private(set) var isDemoMode = false
+    /// Whether the user has let the app use location. Without it there is
+    /// no speed, track, altitude or position, and the displays say so.
+    @Published private(set) var locationAuthorization: CLAuthorizationStatus = .notDetermined
+
+    var isLocationDenied: Bool {
+        !isDemoMode && (locationAuthorization == .denied || locationAuthorization == .restricted)
+    }
 
     /// Wind is only known when something can solve the wind triangle for us.
     /// A phone has no air-data source, so outside demo mode this stays nil and
@@ -97,6 +137,44 @@ final class FlightDataModel: NSObject, ObservableObject {
         didSet { UserDefaults.standard.set(verticalSpeedUnit.rawValue, forKey: Self.vsUnitKey) }
     }
     private static let vsUnitKey = "verticalSpeedDisplayUnit"
+
+    /// What the roll indication measures — see ``RollSource``. Lateral G by
+    /// default: this is an instrument for the road.
+    @Published var rollSource: RollSource = .lateralAcceleration {
+        didSet { UserDefaults.standard.set(rollSource.rawValue, forKey: Self.rollSourceKey) }
+    }
+    private static let rollSourceKey = "rollSource"
+
+    /// Riding in an airliner rather than driving: set from the PLANE
+    /// transport mode. In the cabin the barometer reads cabin pressure, the
+    /// compass sits among metal and wiring, and a coordinated turn leaves no
+    /// lateral force to sense — so vertical speed comes from GPS altitude,
+    /// heading from GPS track, bank from the rate of turn and pitch from the
+    /// flight path.
+    @Published var isFlightMode = false {
+        didSet {
+            guard isFlightMode != oldValue else { return }
+            verticalSpeedTargetFpm = 0
+            lastBaroSample = nil
+        }
+    }
+
+    /// In the Simulator, a flight plan for the demo to fly — climb, cruise
+    /// and descent along its path — instead of the circuit over Boston.
+    var demoFlightPlan: FlightPlan? {
+        didSet {
+            guard isDemoMode, demoFlightPlan?.id != oldValue?.id else { return }
+            demoTimer?.invalidate()
+            demoTimer = nil
+            startDemoMode()
+        }
+    }
+
+    /// Whose flight deck the displays imitate — see ``DisplayStyle``.
+    @Published var displayStyle: DisplayStyle = .airbus {
+        didSet { UserDefaults.standard.set(displayStyle.rawValue, forKey: Self.displayStyleKey) }
+    }
+    private static let displayStyleKey = "displayStyle"
 
     // MARK: Derived air data
 
@@ -143,19 +221,45 @@ final class FlightDataModel: NSObject, ObservableObject {
     private var lastAltitudeSample: (date: Date, feet: Double)?
     private var lastSpeedSample: (date: Date, kts: Double)?
 
+    /// The motion sensors run at this rate, and so does everything derived
+    /// from them — it is the displays' frame clock.
+    private static let motionRateHz = 60.0
+
     // Speed display dynamics (see stepSpeedDynamics).
     private var gpsSpeedKts = 0.0
     private var speedTrendTargetKts = 0.0
-    private var speedLagFilter = LagFilter(cornerFrequency: 1.2)
-    private var trendRateLimiter = RateLimiter(risingRate: 12, fallingRate: -12)
+    private var speedSmoother = Smoother(timeConstant: 0.8)
+    private var trendSlew = SlewLimiter(maxRate: 10)
     private var lastMotionTimestamp: TimeInterval?
+    private var lastMotionDate: Date?
+
+    // Vehicle acceleration, low-passed to strip road vibration (see
+    // updateAttitude).
+    private var accelerationFilter = VectorSmoother(timeConstant: 1.4)
+    /// Rate of turn about the vertical, °/s, smoothed — the flight-mode bank.
+    private var turnRateSmoother = Smoother(timeConstant: 1.5)
+    private var filteredAcceleration = simd_double3(repeating: 0)
+
+    // Dead reckoning between GPS fixes (see stepDeadReckoning). Each anchor is
+    // the last fix, carried forward the same way the display value is, so the
+    // difference between them is the error left to close.
+    private var displayCoordinate: CLLocationCoordinate2D?
+    private var fixAnchor: CLLocationCoordinate2D?
+    private var trackAnchorDeg: Double?
+    private var altitudeAnchorFt: Double?
+    private var lastFixAccuracy: (horizontal: Double, vertical: Double) = (0, 0)
+    /// Fraction of the remaining anchor error closed per second.
+    private static let anchorPullRate = 2.0
+    /// GPS altitude is the noisiest of the three; the barometer-driven climb
+    /// carries most of the weight and the fix pulls only gently.
+    private static let altitudeAnchorPullRate = 0.4
 
     // Vertical speed: barometric when the phone has a pressure sensor,
     // GPS-derived otherwise.
     private var hasBarometer = false
     private var lastBaroSample: (time: TimeInterval, meters: Double)?
     private var verticalSpeedTargetFpm = 0.0
-    private var verticalSpeedLagFilter = LagFilter(cornerFrequency: 1.2)
+    private var verticalSpeedSmoother = Smoother(timeConstant: 0.8)
     private var demoTimer: Timer?
     private var hasInitialisedSelectedAltitude = false
 
@@ -175,6 +279,14 @@ final class FlightDataModel: NSObject, ObservableObject {
         if let raw = UserDefaults.standard.string(forKey: Self.vsUnitKey),
            let unit = VerticalSpeedUnit(rawValue: raw) {
             verticalSpeedUnit = unit
+        }
+        if let raw = UserDefaults.standard.string(forKey: Self.rollSourceKey),
+           let source = RollSource(rawValue: raw) {
+            rollSource = source
+        }
+        if let raw = UserDefaults.standard.string(forKey: Self.displayStyleKey),
+           let style = DisplayStyle(rawValue: raw) {
+            displayStyle = style
         }
     }
 
@@ -207,7 +319,7 @@ final class FlightDataModel: NSObject, ObservableObject {
         guard CMAltimeter.isRelativeAltitudeAvailable() else { return }
         hasBarometer = true
         altimeter.startRelativeAltitudeUpdates(to: .main) { [weak self] data, _ in
-            guard let self, let data, !self.isDemoMode else { return }
+            guard let self, let data, !self.isDemoMode, !self.isFlightMode else { return }
             let meters = data.relativeAltitude.doubleValue
             if let last = self.lastBaroSample {
                 let dt = data.timestamp - last.time
@@ -282,7 +394,7 @@ final class FlightDataModel: NSObject, ObservableObject {
 
     private func startMotionUpdates() {
         guard motion.isDeviceMotionAvailable else { return }
-        motion.deviceMotionUpdateInterval = 1.0 / 30.0
+        motion.deviceMotionUpdateInterval = 1.0 / Self.motionRateHz
         let frame: CMAttitudeReferenceFrame =
             CMMotionManager.availableAttitudeReferenceFrames().contains(.xMagneticNorthZVertical)
             ? .xMagneticNorthZVertical : .xArbitraryZVertical
@@ -294,22 +406,36 @@ final class FlightDataModel: NSObject, ObservableObject {
 
     private func processDeviceMotion(_ dm: CMDeviceMotion, magneticFrame: Bool) {
         guard !isDemoMode else { return }
+        lastMotionDate = Date()
 
-        // The motion callback is the display's frame clock: step the speed
-        // dynamics here so the tape glides at 30 Hz between 1 Hz GPS fixes.
-        if let last = lastMotionTimestamp {
-            stepSpeedDynamics(deltaTime: dm.timestamp - last)
+        // Unit vector toward the ground, the accelerometer's reaction to the
+        // vehicle's own acceleration (both in g) and the turn rates, all in
+        // device coordinates.
+        let rawGravity = simd_double3(dm.gravity.x, dm.gravity.y, dm.gravity.z)
+        let g = simd_length(rawGravity) > 0.5 ? simd_normalize(rawGravity) : simd_double3(0, -1, 0)
+        lastGravity = g
+        let acceleration = simd_double3(dm.userAcceleration.x, dm.userAcceleration.y,
+                                        dm.userAcceleration.z)
+        let rotationRate = simd_double3(dm.rotationRate.x, dm.rotationRate.y, dm.rotationRate.z)
+
+        // The motion callback is the display's frame clock: step every
+        // dynamic here so the picture glides at the motion rate between 1 Hz
+        // GPS fixes.
+        if let last = lastMotionTimestamp, dm.timestamp - last > 0, dm.timestamp - last < 2 {
+            let dt = dm.timestamp - last
+            filteredAcceleration = accelerationFilter.step(toward: acceleration, deltaTime: dt)
+            stepSpeedDynamics(deltaTime: dt)
+            // Rate of turn about the vertical, clockwise from above positive:
+            // the rotation-rate component along gravity.
+            let turnRate = simd_dot(rotationRate, g) * 180 / .pi
+            _ = turnRateSmoother.step(toward: turnRate, deltaTime: dt)
+            stepDeadReckoning(deltaTime: dt, headingRateDegPerSec: turnRate)
+        } else {
+            filteredAcceleration = acceleration
         }
         lastMotionTimestamp = dm.timestamp
 
-        let g = dm.gravity   // unit vector toward the ground, in device coordinates
-        lastGravity = simd_double3(g.x, g.y, g.z)
-
-        // 0° pitch/roll when the phone is exactly vertical — or, once
-        // calibrated, in whatever pose the crew captured as zero.
-        let gv = calibrationRotation.map { $0 * lastGravity! } ?? lastGravity!
-        pitchDeg = atan2(gv.z, -gv.y) * 180 / .pi
-        rollDeg  = atan2(gv.x, -gv.y) * 180 / .pi
+        updateAttitude(gravity: g)
 
         if magneticFrame {
             // Reference frame: x = magnetic north, z = up, y = west.
@@ -329,6 +455,65 @@ final class FlightDataModel: NSObject, ObservableObject {
         updateHeading()
     }
 
+    /// Pitch and roll from the gravity vector — 0° when the phone is exactly
+    /// vertical, or, once calibrated, in whatever pose the crew captured as
+    /// zero.
+    private func updateAttitude(gravity g: simd_double3) {
+        let rotate = calibrationRotation ?? matrix_identity_double3x3
+        let gv = rotate * g
+        pitchDeg = atan2(gv.z, -gv.y) * 180 / .pi
+        let tiltRoll = atan2(gv.x, -gv.y) * 180 / .pi
+
+        // Apparent gravity: where a plumb line hangs once the vehicle's own
+        // acceleration is added to gravity. In an aircraft it stays down the
+        // body axis through a coordinated turn; in a car it swings outward
+        // through the corner while the body stays level.
+        //
+        // Core Motion's userAcceleration is the accelerometer's reaction
+        // reading, not the vehicle's acceleration: it points the way the
+        // plumb line swings (a right turn reads negative x — the same
+        // convention that has gravity read -1 along the down axis). So
+        // apparent gravity is gravity *plus* userAcceleration, i.e. the raw
+        // accelerometer vector, and the vehicle's own lateral acceleration,
+        // positive to the right, is its negative.
+        let apparent = rotate * (g + filteredAcceleration)
+        lateralG = -(rotate * filteredAcceleration).x
+
+        if isFlightMode {
+            // A coordinated turn at bank φ and speed V turns at ω = g·tanφ/V,
+            // so the bank follows from the rate of turn and the ground speed
+            // (close enough to airspeed for a display). Pitch is the flight
+            // path angle: the phone's own tilt says nothing about the cabin.
+            let speedMps = groundSpeedKts * 0.514444
+            let omega = turnRateSmoother.value * .pi / 180
+            rollDeg = speedMps > 25 ? atan(speedMps * omega / 9.80665) * 180 / .pi : 0
+            pitchDeg = flightPathAngleDeg
+            return
+        }
+
+        switch rollSource {
+        case .tilt:
+            rollDeg = tiltRoll
+        case .lateralAcceleration:
+            // The bank that would put apparent gravity down the body axis:
+            // the body's tilt from true gravity, less its tilt from apparent
+            // gravity. For an aircraft in a coordinated turn the second term
+            // is zero and this is plain roll; for a car cornering flat the
+            // first is zero and this is the turn's equivalent bank.
+            let apparentRoll = atan2(apparent.x, -apparent.y) * 180 / .pi
+            rollDeg = angularDifference(tiltRoll, apparentRoll)
+        }
+    }
+
+    /// The flight-mode attitude for the demo flight, which has no motion
+    /// stream: bank from its rate of turn, pitch from its flight path.
+    fileprivate func updateAttitudeForDemoFlight() {
+        let speedMps = groundSpeedKts * 0.514444
+        let omega = turnRateSmoother.value * .pi / 180
+        rollDeg = atan(speedMps * omega / 9.80665) * 180 / .pi
+        pitchDeg = flightPathAngleDeg
+    }
+
     /// Prefer GPS track when moving; magnetic heading only when slow/stationary.
     private func updateHeading() {
         if groundSpeedKts > 3 {
@@ -337,25 +522,27 @@ final class FlightDataModel: NSObject, ObservableObject {
             headingDeg = magneticHeadingDeg
             // Stationary, there is no meaningful track: park it on the heading
             // so the ND track line stays on the lubber line instead of
-            // swinging to wherever a stale GPS course points.
+            // swinging to wherever a stale GPS course points. The next course
+            // fix, once rolling, starts the track afresh.
             trackDeg = headingDeg
+            trackAnchorDeg = nil
         }
     }
 
     // MARK: - Speed display dynamics
 
-    /// Display dynamics from the A32NX PFD: the tape value and the V/S needle
-    /// glide through first-order lags, and the trend arrow slews at no more
-    /// than ±12 kt/s toward its target, appearing above 2 kt of trend and
-    /// disappearing only below 1 kt. Stepped at the motion rate (or the demo
+    /// Display dynamics: the tape value and the V/S needle glide toward the
+    /// sensor values with a time constant just under a second, and the trend
+    /// arrow slews at no more than 10 kt/s toward its target, appearing above
+    /// 2 kt of trend and disappearing only below 1 kt. Stepped at the motion rate (or the demo
     /// timer), so everything animates smoothly even though the sensors only
     /// report about once a second.
     private func stepSpeedDynamics(deltaTime: Double) {
         guard deltaTime > 0, deltaTime < 2 else { return }
-        groundSpeedKts = speedLagFilter.step(gpsSpeedKts, deltaTime: deltaTime)
-        speedTrendKts = trendRateLimiter.step(speedTrendTargetKts, deltaTime: deltaTime)
-        verticalSpeedFpm = verticalSpeedLagFilter.step(verticalSpeedTargetFpm,
-                                                       deltaTime: deltaTime)
+        groundSpeedKts = speedSmoother.step(toward: gpsSpeedKts, deltaTime: deltaTime)
+        speedTrendKts = trendSlew.step(toward: speedTrendTargetKts, deltaTime: deltaTime)
+        verticalSpeedFpm = verticalSpeedSmoother.step(toward: verticalSpeedTargetFpm,
+                                                      deltaTime: deltaTime)
 
         if abs(speedTrendTargetKts) < 1 {
             isSpeedTrendShown = false
@@ -364,15 +551,91 @@ final class FlightDataModel: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Dead reckoning
+
+    /// Between GPS fixes the track, position and altitude are dead-reckoned at
+    /// the motion rate: track carried by the gyro's yaw rate, position by
+    /// ground speed along the track, altitude by the vertical speed. A fix is
+    /// never applied as a jump. It becomes an anchor that is carried forward
+    /// the same way, and the display closes onto it over the next second — so
+    /// the ND, the heading tape and the guidance move continuously, and a
+    /// turn shows on the displays as it happens rather than a second later.
+    private func stepDeadReckoning(deltaTime dt: Double, headingRateDegPerSec: Double) {
+        guard dt > 0, dt < 2 else { return }
+        let pull = min(1, dt * Self.anchorPullRate)
+        let moving = groundSpeedKts > 3
+
+        if moving, let anchor = trackAnchorDeg {
+            let yaw = headingRateDegPerSec * dt
+            trackDeg = normalizedHeading(trackDeg + yaw)
+            let carried = normalizedHeading(anchor + yaw)
+            trackAnchorDeg = carried
+            let error = angularDifference(carried, trackDeg)
+            // A gross disagreement — the magnetic heading was wrong when we
+            // started rolling — is snapped rather than eased.
+            trackDeg = normalizedHeading(trackDeg + (abs(error) > 45 ? error : error * pull))
+        }
+
+        if var position = displayCoordinate, var anchor = fixAnchor {
+            if moving {
+                let meters = groundSpeedKts / Self.mpsToKts * dt
+                let t = trackDeg * .pi / 180
+                position = Self.offset(position, northMeters: meters * cos(t), eastMeters: meters * sin(t))
+                anchor = Self.offset(anchor, northMeters: meters * cos(t), eastMeters: meters * sin(t))
+            }
+            position = CLLocationCoordinate2D(
+                latitude: position.latitude + (anchor.latitude - position.latitude) * pull,
+                longitude: position.longitude + (anchor.longitude - position.longitude) * pull)
+            displayCoordinate = position
+            fixAnchor = anchor
+        }
+
+        if let anchor = altitudeAnchorFt {
+            let climb = verticalSpeedFpm / 60 * dt
+            altitudeFt += climb
+            let carried = anchor + climb
+            altitudeAnchorFt = carried
+            altitudeFt += (carried - altitudeFt) * min(1, dt * Self.altitudeAnchorPullRate)
+        }
+
+        publishLocation()
+    }
+
+    private func publishLocation() {
+        guard let coordinate = displayCoordinate else { return }
+        location = CLLocation(coordinate: coordinate,
+                              altitude: altitudeFt / Self.metersToFt,
+                              horizontalAccuracy: lastFixAccuracy.horizontal,
+                              verticalAccuracy: lastFixAccuracy.vertical,
+                              course: trackDeg,
+                              speed: groundSpeedKts / Self.mpsToKts,
+                              timestamp: Date())
+    }
+
+    private static func offset(_ c: CLLocationCoordinate2D,
+                               northMeters: Double, eastMeters: Double) -> CLLocationCoordinate2D {
+        let metersPerDegree = 111_320.0
+        return CLLocationCoordinate2D(
+            latitude: c.latitude + northMeters / metersPerDegree,
+            longitude: c.longitude + eastMeters / (metersPerDegree * cos(c.latitude * .pi / 180)))
+    }
+
+    private static func distanceMeters(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Double {
+        CLLocation(latitude: a.latitude, longitude: a.longitude)
+            .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
+    }
+
     // MARK: - Location processing
 
+    /// Each fix retargets the display dynamics and re-anchors the dead
+    /// reckoning; the displays themselves glide toward the new values in the
+    /// motion callback.
     private func processLocation(_ loc: CLLocation) {
         guard !isDemoMode else { return }
-        location = loc
+        gpsFix = loc
+        lastFixAccuracy = (loc.horizontalAccuracy, loc.verticalAccuracy)
 
         if loc.speed >= 0 {
-            // Each fix only retargets the display dynamics — the tape itself
-            // glides toward the new value in stepSpeedDynamics.
             gpsSpeedKts = loc.speed * Self.mpsToKts
 
             if let last = lastSpeedSample {
@@ -386,18 +649,33 @@ final class FlightDataModel: NSObject, ObservableObject {
                 lastSpeedSample = (loc.timestamp, gpsSpeedKts)
             }
         }
+
         if loc.course >= 0, loc.speed * Self.mpsToKts > 3 {
-            trackDeg = loc.course
+            // The first course after standing still starts the track outright;
+            // after that the gyro carries it and each fix only anchors it.
+            if trackAnchorDeg == nil { trackDeg = loc.course }
+            trackAnchorDeg = loc.course
         }
+
+        // The first fix — or a jump too big to glide across, such as leaving
+        // a tunnel — is the display position outright.
+        if let current = displayCoordinate, Self.distanceMeters(current, loc.coordinate) < 150 {
+            fixAnchor = loc.coordinate
+        } else {
+            displayCoordinate = loc.coordinate
+            fixAnchor = loc.coordinate
+        }
+
         if loc.verticalAccuracy > 0 {
             let feet = loc.altitude * Self.metersToFt
-            altitudeFt += (feet - altitudeFt) * 0.3
+            if altitudeAnchorFt == nil { altitudeFt = feet }
+            altitudeAnchorFt = feet
 
             // Park the FCU bug a round 1000 ft above the first fix so the
             // altitude tape has a sensible target until the crew moves it.
             if !hasInitialisedSelectedAltitude {
                 hasInitialisedSelectedAltitude = true
-                selectedAltitudeFt = ((altitudeFt / 1_000).rounded(.down) + 1) * 1_000
+                selectedAltitudeFt = ((feet / 1_000).rounded(.down) + 1) * 1_000
             }
 
             // GPS-derived climb rate, for devices without a barometer only.
@@ -406,7 +684,7 @@ final class FlightDataModel: NSObject, ObservableObject {
             if let last = lastAltitudeSample {
                 let dt = loc.timestamp.timeIntervalSince(last.date)
                 if dt > 0.5 {
-                    if !hasBarometer {
+                    if !hasBarometer || isFlightMode {
                         let fpm = (feet - last.feet) / dt * 60
                         verticalSpeedTargetFpm += (fpm - verticalSpeedTargetFpm) * 0.4
                     }
@@ -415,6 +693,16 @@ final class FlightDataModel: NSObject, ObservableObject {
             } else {
                 lastAltitudeSample = (loc.timestamp, feet)
             }
+        }
+
+        // With no motion stream to carry the dead reckoning, the fix is the
+        // display, stepped once per fix.
+        if lastMotionDate.map({ Date().timeIntervalSince($0) > 1 }) ?? true {
+            stepSpeedDynamics(deltaTime: 1)
+            if let anchor = trackAnchorDeg { trackDeg = anchor }
+            if let anchor = altitudeAnchorFt { altitudeFt = anchor }
+            displayCoordinate = fixAnchor
+            publishLocation()
         }
         updateHeading()
     }
@@ -426,98 +714,171 @@ final class FlightDataModel: NSObject, ObservableObject {
     private func startDemoMode() {
         guard demoTimer == nil else { return }
         isDemoMode = true
+        if let plan = demoFlightPlan {
+            startDemoFlight(plan)
+            return
+        }
         var demoHeading = 80.0
         var demoAltFt = 9_800.0
         var demoLat = 42.363, demoLon = -71.006     // over Boston Logan
         var t = 0.0
+        var lastFixTime = -1.0
 
-        // A steady climb at a jet speed so the Mach, VLS and VMAX annotations
-        // on the tapes all sit somewhere meaningful.
+        // A steady climb at a jet speed so the Mach readout and the tape
+        // annotations all sit somewhere meaningful.
         windDirDeg = 270
         windSpeedKts = 46
         selectedAltitudeFt = 12_000
 
-        demoTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+        let interval = 1.0 / Self.motionRateHz
+        demoTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                t += 1.0 / 30.0
+                t += interval
                 let bank = 12 + 8 * sin(t / 6)
                 let speed = 280.0
-                demoHeading = (demoHeading + bank * 0.09 / 30).truncatingRemainder(dividingBy: 360)
-                demoAltFt += 900.0 / 60 / 30
+                demoHeading = (demoHeading + bank * 0.09 * interval).truncatingRemainder(dividingBy: 360)
+                demoAltFt += 900.0 / 60 * interval
 
                 // Dead-reckon the position (1 kt ≈ 1/60 deg lat per hour).
-                let distDeg = speed / 3600.0 / 60.0 / 30.0
+                let distDeg = speed / 3600.0 / 60.0 * interval
                 demoLat += distDeg * cos(demoHeading * .pi / 180)
                 demoLon += distDeg * sin(demoHeading * .pi / 180) / cos(demoLat * .pi / 180)
 
                 self.pitchDeg = 7 + 2 * sin(t / 4)
                 self.rollDeg = bank
+                self.lateralG = tan(bank * .pi / 180)
                 // Crabbing into the demo wind, so track and heading differ and
                 // the drift-driven symbology (FPV, track line) is visible.
                 self.trackDeg = demoHeading
                 self.headingDeg = normalizedHeading(demoHeading - 6)
                 self.gpsSpeedKts = speed + 5 * sin(t / 9)
                 self.speedTrendTargetKts = 5.0 / 9 * cos(t / 9) * 10    // d(GS)/dt over 10 s
-                self.stepSpeedDynamics(deltaTime: 1.0 / 30.0)
+                self.stepSpeedDynamics(deltaTime: interval)
                 self.altitudeFt = demoAltFt
                 self.verticalSpeedTargetFpm = 900 + 100 * sin(t / 4)
-                self.location = CLLocation(
+                let fix = CLLocation(
                     coordinate: .init(latitude: demoLat, longitude: demoLon),
                     altitude: demoAltFt / Self.metersToFt,
                     horizontalAccuracy: 5, verticalAccuracy: 5,
                     course: demoHeading, speed: speed / Self.mpsToKts,
                     timestamp: Date()
                 )
+                self.location = fix
+                // A once-a-second "GPS fix", as the real receiver would give.
+                if t - lastFixTime >= 1 {
+                    lastFixTime = t
+                    self.gpsFix = fix
+                }
             }
         }
     }
 }
 
-// MARK: - Display dynamics filters
-//
-// Ported from the FlyByWire A32NX PFD (PFDUtils.tsx), which is the reference
-// implementation for how these displays move.
+// MARK: - Demo flight
 
-/// First-order lag filter (bilinear discretisation).
-struct LagFilter {
-    private var previousInput = 0.0
-    private var previousOutput = 0.0
-    let cornerFrequency: Double
+extension FlightDataModel {
+    /// Flies the plan in the Simulator: along its path at airliner speeds,
+    /// climbing and descending on its vertical profile, starting
+    /// `demoStartNm` along it (a launch argument; 30 NM by default) and with
+    /// the clock running at `demoTimeScale` times real time (default 1).
+    fileprivate func startDemoFlight(_ plan: FlightPlan) {
+        let defaults = UserDefaults.standard
+        var along = defaults.object(forKey: "demoStartNm") != nil ? defaults.double(forKey: "demoStartNm") : 30
+        let timeScale = max(1, defaults.double(forKey: "demoTimeScale"))
+        let total = plan.totalDistanceNm
+        var lastFixTime = -1.0
+        var t = 0.0
+        windDirDeg = nil
+        windSpeedKts = nil
+        selectedAltitudeFt = plan.reachableCruiseFt
 
-    init(cornerFrequency: Double) {
-        self.cornerFrequency = cornerFrequency
-    }
+        let interval = 1.0 / 60
+        demoTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                t += interval
+                let dt = interval * timeScale
+                // Speed schedule: 250 kt low down, cruise at altitude, slowing
+                // through the descent.
+                let altitude = plan.plannedAltitudeFt(atNm: along)
+                let speed = 250 + min(1, max(0, (altitude - 10_000) / 20_000)) * 200
+                let previousAlt = altitude
+                along = min(total, along + speed * dt / 3600)
+                let newAlt = plan.plannedAltitudeFt(atNm: along)
+                let here = plan.coordinate(atNm: along)
+                let course = plan.course(atNm: along)
 
-    mutating func step(_ input: Double, deltaTime: Double) -> Double {
-        let input = input.isNaN ? 0 : input
-        let scaled = deltaTime * cornerFrequency
-        let sum0 = scaled + 2
-        let output = (input + previousInput) * scaled / sum0
-            + (2 - scaled) / sum0 * previousOutput
-        previousInput = input
-        if output.isFinite { previousOutput = output }
-        return previousOutput
+                self.verticalSpeedTargetFpm = dt > 0 ? (newAlt - previousAlt) / dt * 60 : 0
+                self.gpsSpeedKts = along < total ? speed : 0
+                self.stepSpeedDynamics(deltaTime: dt)
+                let turn = angularDifference(course, self.trackDeg) / max(dt, 1e-3)
+                _ = self.turnRateSmoother.step(toward: max(-3, min(3, turn)), deltaTime: dt)
+                self.trackDeg = course
+                self.headingDeg = course
+                self.altitudeFt = newAlt
+                self.updateAttitudeForDemoFlight()
+                let fix = CLLocation(coordinate: here, altitude: newAlt / 3.28084,
+                                     horizontalAccuracy: 5, verticalAccuracy: 5,
+                                     course: course, speed: speed / 1.943844, timestamp: Date())
+                self.location = fix
+                if t - lastFixTime >= 1 {
+                    lastFixTime = t
+                    self.gpsFix = fix
+                }
+            }
+        }
     }
 }
 
-/// Limits how fast the output may chase the input, with separate rising and
-/// falling rates (per second).
-struct RateLimiter {
-    private var previousOutput = 0.0
-    let risingRate: Double
-    let fallingRate: Double
+// MARK: - Display dynamics
 
-    init(risingRate: Double, fallingRate: Double) {
-        self.risingRate = risingRate
-        self.fallingRate = fallingRate
+/// Exponential smoothing: each step closes the gap to the input by the share
+/// a first-order system with time constant `timeConstant` would close in
+/// `deltaTime`, so the result does not depend on the step rate.
+struct Smoother {
+    let timeConstant: TimeInterval
+    private(set) var value = 0.0
+
+    init(timeConstant: TimeInterval) {
+        self.timeConstant = timeConstant
     }
 
-    mutating func step(_ input: Double, deltaTime: Double) -> Double {
-        let input = input.isNaN ? 0 : input
-        let delta = input - previousOutput
-        previousOutput += max(min(risingRate * deltaTime, delta), fallingRate * deltaTime)
-        return previousOutput
+    mutating func step(toward target: Double, deltaTime: TimeInterval) -> Double {
+        guard target.isFinite, deltaTime > 0 else { return value }
+        value += (target - value) * -expm1(-deltaTime / timeConstant)
+        return value
+    }
+}
+
+/// ``Smoother`` applied to each axis of a vector.
+struct VectorSmoother {
+    private var axes: [Smoother]
+
+    init(timeConstant: TimeInterval) {
+        axes = Array(repeating: Smoother(timeConstant: timeConstant), count: 3)
+    }
+
+    mutating func step(toward target: simd_double3, deltaTime: TimeInterval) -> simd_double3 {
+        simd_double3((0..<3).map { axes[$0].step(toward: target[$0], deltaTime: deltaTime) })
+    }
+}
+
+/// Follows its target, but never faster than `maxRate` units per second in
+/// either direction.
+struct SlewLimiter {
+    let maxRate: Double
+    private(set) var value = 0.0
+
+    init(maxRate: Double) {
+        self.maxRate = maxRate
+    }
+
+    mutating func step(toward target: Double, deltaTime: TimeInterval) -> Double {
+        guard target.isFinite, deltaTime > 0 else { return value }
+        let limit = maxRate * deltaTime
+        value += min(max(target - value, -limit), limit)
+        return value
     }
 }
 
@@ -533,5 +894,10 @@ extension FlightDataModel: CLLocationManagerDelegate {
     nonisolated func locationManager(_ manager: CLLocationManager,
                                      didFailWithError error: Error) {
         // Keep last known values; GPS will recover on its own.
+    }
+
+    nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        let status = manager.authorizationStatus
+        Task { @MainActor in self.locationAuthorization = status }
     }
 }

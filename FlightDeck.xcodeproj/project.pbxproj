@@ -193,8 +193,12 @@
 				DEVELOPMENT_TEAM = NY26DHXVSR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "FlightDeck uses your location to show ground speed, altitude, track and your position on the navigation display.";
+				INFOPLIST_KEY_CFBundleDisplayName = FlightDeck;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.navigation";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "FlightDeck uses your location to show ground speed, altitude, track and your position on the navigation display. With the speed limit display on, your position is also sent to OpenStreetMap's Overpass service to look up the limit of the road you are on.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "FlightDeck uses motion sensors to display pitch, roll and heading on the primary flight display.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
@@ -224,8 +228,12 @@
 				DEVELOPMENT_TEAM = NY26DHXVSR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "FlightDeck uses your location to show ground speed, altitude, track and your position on the navigation display.";
+				INFOPLIST_KEY_CFBundleDisplayName = FlightDeck;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.navigation";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "FlightDeck uses your location to show ground speed, altitude, track and your position on the navigation display. With the speed limit display on, your position is also sent to OpenStreetMap's Overpass service to look up the limit of the road you are on.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "FlightDeck uses motion sensors to display pitch, roll and heading on the primary flight display.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
