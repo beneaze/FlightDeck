@@ -32,6 +32,20 @@ final class MCDUController: ObservableObject {
     @Published var departureRunway: Runway?
     @Published var approachRunway: Runway?
     @Published var enroute: [FlightPlan.Fix] = []
+    /// Published procedures chosen on DEPARTURES / ARRIVALS: names and
+    /// transitions, looked up in ``ProcedureDatabase``.
+    @Published var sidName: String?
+    @Published var sidTransition: String?
+    @Published var starName: String?
+    @Published var starTransition: String?
+    @Published var approachName: String?
+    @Published var approachVia: String?
+    /// Which list the DEPARTURES / ARRIVALS page shows.
+    @Published var departureList: DepartureList = .runways
+    @Published var arrivalList: ArrivalList = .approaches
+
+    enum DepartureList { case runways, sids, transitions }
+    enum ArrivalList { case approaches, vias, stars, transitions }
     @Published var lookup: FlightLookupResult?
     @Published var isLookingUp = false
     /// The plan the entries above make, rebuilt whenever one changes.
@@ -43,6 +57,31 @@ final class MCDUController: ObservableObject {
     @Published var searchQuery = ""
     @Published var selected: (name: String, coordinate: CLLocationCoordinate2D)?
     @Published var isShowingMap = false
+
+    // MARK: X-Plane navigation data
+
+    @Published var isShowingImporter = false
+    @Published private(set) var isImportingNavData = false
+
+    /// Copy the X-Plane navigation data folder the user picked.
+    func importNavData(_ result: Result<URL, Error>) {
+        guard case .success(let url) = result else { return }
+        isImportingNavData = true
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try XPlaneNavData.shared.importFolder(url) }
+            await MainActor.run {
+                self.isImportingNavData = false
+                switch outcome {
+                case .success(let count):
+                    self.refreshPlan()
+                    self.flash("XP DATA: \(count) AIRPORTS")
+                case .failure(let error):
+                    let text = (error as? XPlaneNavData.ImportError)?.errorDescription ?? "IMPORT FAILED"
+                    self.flash(String(text.uppercased().prefix(22)), amber: true)
+                }
+            }
+        }
+    }
 
     // MARK: Models
 
@@ -98,6 +137,12 @@ final class MCDUController: ObservableObject {
     func show(_ target: MCDUPage) {
         page = target
         subpage = 0
+        // DEPARTURES / ARRIVALS open on the first choice still to make.
+        if target == .departure {
+            departureList = departureRunway == nil ? .runways : (sidName == nil ? .sids : .transitions)
+        } else if target == .arrival {
+            arrivalList = approachName == nil && approachRunway == nil ? .approaches : (starName == nil ? .stars : .transitions)
+        }
     }
 
     /// What the scratchpad line shows.
@@ -193,13 +238,74 @@ final class MCDUController: ObservableObject {
             cruiseAltitudeFt: cruiseLevel.map { Double($0) * 100 },
             route: fromLookup ? lookup?.route : nil,
             source: fromLookup ? (lookup?.source ?? .greatCircle) : .greatCircle,
-            departureRunway: departureRunway, approachRunway: approachRunway, enroute: enroute)
+            departureRunway: departureRunway, approachRunway: approachRunway, enroute: enroute,
+            sid: sidRoute(from: origin), star: starRoute(to: destination), approach: approachRoute(to: destination))
+    }
+
+    // MARK: Procedures
+
+    func procedures(at airport: Airport?) -> TerminalProcedures {
+        airport.map { ProcedureDatabase.shared.procedures(at: $0) } ?? TerminalProcedures()
+    }
+
+    private func sidRoute(from origin: Airport) -> FlightPlan.ProcedureRoute? {
+        guard let sidName else { return nil }
+        let legs = procedures(at: origin).sidLegs(sidName, runway: departureRunway, transition: sidTransition)
+        let start = departureRunway.map { GreatCircle.destination(from: $0.coordinate, courseDeg: $0.headingDeg,
+                                                                  distanceNm: $0.lengthNm) } ?? origin.coordinate
+        let fixes = ProcedureBuilder.fixes(legs, kind: .departure, from: start,
+                                           startAltitudeFt: departureRunway?.elevationFt ?? origin.elevationFt,
+                                           variationDeg: ProcedureBuilder.variation(departureRunway))
+        return FlightPlan.ProcedureRoute(name: [sidName, sidTransition].compactMap { $0 }.joined(separator: "."),
+                                         legs: fixes)
+    }
+
+    private func starRoute(to destination: Airport) -> FlightPlan.ProcedureRoute? {
+        guard let starName else { return nil }
+        let legs = procedures(at: destination).starLegs(starName, transition: starTransition, runway: approachRunway)
+        let fixes = ProcedureBuilder.fixes(legs, kind: .arrival, from: destination.coordinate,
+                                           startAltitudeFt: destination.elevationFt,
+                                           variationDeg: ProcedureBuilder.variation(approachRunway))
+        return FlightPlan.ProcedureRoute(name: [starTransition, starName].compactMap { $0 }.joined(separator: "."),
+                                         legs: fixes)
+    }
+
+    private func approachRoute(to destination: Airport) -> FlightPlan.ProcedureRoute? {
+        guard let approachName else { return nil }
+        let legs = procedures(at: destination).approachLegs(approachName, via: approachVia)
+        let fixes = ProcedureBuilder.fixes(legs, kind: .approach, from: destination.coordinate,
+                                           startAltitudeFt: destination.elevationFt,
+                                           variationDeg: ProcedureBuilder.variation(approachRunway),
+                                           lastIsDestination: true)
+        return FlightPlan.ProcedureRoute(name: [approachVia, approachName].compactMap { $0 }.joined(separator: "."),
+                                         legs: fixes)
+    }
+
+    /// Choose an approach: it sets the landing runway, and a STAR whose
+    /// runway transition no longer fits keeps its common route.
+    func chooseApproach(_ name: String?) {
+        approachName = name
+        approachVia = nil
+        if let name, let destination, let ident = ProcedureDatabase.approachRunway(name) {
+            approachRunway = NavDatabase.shared.runway(ident, at: destination)
+        }
+        refreshPlan()
     }
 
     /// New airports: runways and waypoints chosen for the old ones go.
     func setAirports(origin newOrigin: Airport?, destination newDestination: Airport?) {
-        if newOrigin != origin { departureRunway = nil }
-        if newDestination != destination { approachRunway = nil }
+        if newOrigin != origin {
+            departureRunway = nil
+            sidName = nil
+            sidTransition = nil
+        }
+        if newDestination != destination {
+            approachRunway = nil
+            starName = nil
+            starTransition = nil
+            approachName = nil
+            approachVia = nil
+        }
         if newOrigin != origin || newDestination != destination { enroute = [] }
         origin = newOrigin
         destination = newDestination
@@ -303,9 +409,10 @@ final class MCDUController: ObservableObject {
         case .flightPlan:
             let lines = isEditingFlightPlan ? flightPlanLines.count : (routePlanner?.waypoints.count ?? 0)
             return max(1, Int(ceil(Double(max(lines, 1)) / 5)))
-        case .departure: return max(1, Int(ceil(Double(origin.map { NavDatabase.shared.runways(at: $0).count } ?? 0) / 4)))
-        case .arrival:
-            return max(1, Int(ceil(Double(destination.map { NavDatabase.shared.runways(at: $0).count } ?? 0) / 4)))
+        case .departure, .arrival:
+            let lists = procedureLists
+            let lines = Double(max(lists.left.count, lists.right.count))
+            return max(1, Int(ceil(lines / Double(Self.procedureLinesPerPage))))
         case .flights: return max(1, Int(ceil(Double(packs?.packs.count ?? 0) / 5)))
         case .credits: return max(1, Int(ceil(Double(Self.creditLines.count) / 10)))
         default: return 1

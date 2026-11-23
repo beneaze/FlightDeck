@@ -24,8 +24,17 @@ struct Runway: Codable, Hashable {
     }
 
     var lengthNm: Double { lengthFt / 6_076 }
+    /// "06L" for a runway the source spells "6L": procedures and the
+    /// units always use two digits.
+    var designator: String { Self.designator(ident) }
     /// "RW26R", the way flight plans name runways.
-    var fixIdent: String { "RW" + ident }
+    var fixIdent: String { "RW" + designator }
+
+    static func designator(_ ident: String) -> String {
+        let digits = ident.prefix { $0.isNumber }
+        guard digits.count == 1 else { return ident }
+        return "0" + ident
+    }
 }
 
 /// A radio navaid from the bundled database (OurAirports, public domain).
@@ -124,8 +133,8 @@ final class NavDatabase: @unchecked Sendable {
     }
 
     func runway(_ ident: String, at airport: Airport) -> Runway? {
-        let wanted = ident.uppercased().replacingOccurrences(of: "RW", with: "")
-        return runwaysByAirport[airport.icao]?.first { $0.ident == wanted }
+        let wanted = Runway.designator(ident.uppercased().replacingOccurrences(of: "RW", with: ""))
+        return runwaysByAirport[airport.icao]?.first { $0.designator == wanted }
     }
 
     /// Every navaid with this ident, nearest to `reference` first.

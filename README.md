@@ -183,18 +183,32 @@ For passengers: on the MCDU's MENU page choose **PLANE**, then open the INIT (A3
      style `N3745E02055`). CLR (A320) / DEL (737) and the line-select key
      delete one.
    - The origin's line-select key (737: DEP ARR, <DEP) opens the
-     **departures**: pick the take-off runway. The plan then climbs on runway
-     heading to 1500 ft above the field, shown as `(2900)`-style altitude
-     leg.
+     **departures**: the runway, then the SID and its transition, as on the
+     real units (A320: the list steps RWY → SID → TRANS, R1 moves on; 737:
+     SIDs left, runways right, `<SEL>` beside the chosen ones). The SID's
+     legs come into the plan with their altitude constraints; a leg flown to
+     an altitude becomes a `(520)`-style altitude fix. With no SID the plan
+     climbs on runway heading to 1500 ft above the field.
    - The destination's line-select key (737: DEP ARR, ARR>) opens the
-     **arrivals**: pick a runway for a straight-in 3° approach with an
-     intercept point 12 NM out (`CI26R`) and a final approach fix at 5 NM
-     (`FF26R`), both with their glidepath altitudes as constraints.
-   - Runways (OurAirports, public domain, with real thresholds and headings)
-     and navaids (OurAirports) are bundled. Published SIDs, STARs,
-     approaches and named airway points have no free source, so the pages
-     say NO SID / NO STAR IN DATA BASE and positions stand in for named
-     points.
+     **arrivals**: the approach (ILS, RNAV, LOC, VOR …) and its via, the STAR
+     and its transition. At an airport without published approaches each
+     runway offers a straight-in 3° approach with an intercept point 12 NM
+     out (`CI26R`) and a final approach fix at 5 NM (`FF26R`).
+   - **Where the procedures come from:**
+     - **US airports, bundled:** the FAA's CIFP (public domain, ARINC 424),
+       about 5,600 SIDs, STARs and approaches at the 510 US airports in the
+       airport list, built by `Tools/BuildProcedures` from the 28-day cycle.
+     - **Everywhere else, your own X-Plane data:** settings page, IMPORT XP>.
+       Pick, in the Files app, the folder holding X-Plane's `CIFP` folder with
+       `earth_fix.dat` and `earth_nav.dat` (`Custom Data` or
+       `Resources/default data` of an X-Plane 11/12 install, copied to iCloud
+       Drive or the device). The app copies them and reads them offline;
+       imported data wins over the bundled set. CLR (A320) / DEL (737) on the
+       PROC DATA line removes it. The data stays yours: it is licensed to you
+       with X-Plane (Jeppesen/LIDO via Navigraph or Aerosoft), which is why
+       the app cannot ship it.
+   - Runways and navaids (OurAirports, public domain) are bundled for every
+     airport.
    An edited plan needs DOWNLOAD* again: the terrain follows the route.
 3. **Download for offline.** DOWNLOAD* stores a *flight pack*: the plan and the
    terrain along the route (AWS Open Data terrain tiles, about ±80 NM either
@@ -314,6 +328,8 @@ FlightDeck/
 │   ├── FlightPackStore.swift    Offline flight packs
 │   ├── Airports.swift           Bundled airport and airline tables
 │   ├── NavDatabase.swift        Bundled runways and navaids, waypoint entry parsing
+│   ├── ProcedureDatabase.swift  SIDs, STARs, approaches: FAA US data + imported X-Plane CIFP
+│   ├── XPlaneNavData.swift      Import and reading of the user's X-Plane CIFP / fix / nav files
 │   ├── AutoFlight.swift         FCU / MCP state: targets, modes, FD, AP, approach
 │   ├── AircraftProfile.swift    Per-aircraft envelope and tape scales (A320, B737)
 │   ├── DisplayStyle.swift       Which flight deck the displays imitate
@@ -346,6 +362,7 @@ FlightDeck/
 Tools/
 ├── RenderAppIcon/main.swift     Renders the app icon from the PFD geometry
 ├── BuildAirports/               Builds the bundled airport, runway, navaid and airline tables
+├── BuildProcedures/             Builds the bundled US procedures from the FAA CIFP
 └── FlightArchive/               Daily job that builds the free flight-track archive
 ```
 
@@ -355,6 +372,7 @@ Tools/
 - Flight routes: adsbdb.com (Virtual Radar Server standing data, CC0) and hexdb.io.
 - Flight tracks (optional archive) contain data from adsb.lol (ODbL 1.0).
 - Airports, runways and navaids: OurAirports (public domain). Airline codes: Wikidata (CC0).
+- US terminal procedures: FAA CIFP (public domain).
 - Terrain: AWS Open Data Terrain Tiles (Mapzen / Tilezen). Sources, as
   required by its attribution notice: ArcticDEM (DigitalGlobe imagery, NSF
   awards 1043681, 1559691, 1542736); Australia © Commonwealth of Australia

@@ -30,7 +30,10 @@ extension MCDUController {
         case .credits: title = creditsPage(&rows)
         }
         let count = pageCount
-        return MCDUScreen(title: title, pageNumber: count > 1 ? "\(min(subpage, count - 1) + 1)/\(count)" : nil,
+        // The Airbus DEPARTURES / ARRIVALS titles fill the line; the unit
+        // scrolls their lists with the arrow keys and prints no page number.
+        let numbered = count > 1 && !(!style.isBoeing && (page == .departure || page == .arrival))
+        return MCDUScreen(title: title, pageNumber: numbered ? "\(min(subpage, count - 1) + 1)/\(count)" : nil,
                           rows: rows)
     }
 
@@ -577,8 +580,14 @@ extension MCDUController {
         set(&rows, 1, labelLeft: label("V/S UNIT"),
             left: choice(["M/S", "FT/MIN"], selected: flightData.verticalSpeedUnit == .ms ? 0 : 1),
             right: prompt("CREDITS>"))
-        set(&rows, 2, labelLeft: label("FLIGHT DECK"),
-            left: choice(["A320", "B737"], selected: flightData.displayStyle == .airbus ? 0 : 1))
+        // Procedure data: the bundled US CIFP, plus the user's X-Plane data
+        // once imported.
+        let xplane = XPlaneNavData.shared
+        set(&rows, 2, labelLeft: label("FLIGHT DECK"), labelRight: label("PROC DATA"),
+            left: choice(["A320", "B737"], selected: flightData.displayStyle == .airbus ? 0 : 1),
+            right: isImportingNavData ? data("IMPORTING", .white, small: true)
+                : xplane.isInstalled ? data("XP \(xplane.cycle ?? "")+FAA", .green, small: true)
+                : data("FAA US", .green, small: true))
         if routePlanner.transportMode == .plane {
             set(&rows, 3, labelLeft: label("ROLL"), left: data("TURN RATE", .green, small: true))
             set(&rows, 4, labelLeft: label("SPEED LIMIT"), left: data("N/A IN FLIGHT", .white, small: true))
@@ -593,6 +602,7 @@ extension MCDUController {
                     : [])
             rows[8].right = speedLimits.isEnabled ? label("LIMIT") : []
         }
+        rows[7].right = prompt(xplane.isInstalled ? "REIMPORT>" : "IMPORT XP>")
         set(&rows, 5, labelLeft: label("ATTITUDE ZERO"),
             labelRight: flightData.isCalibrated ? label("MOUNT") : label("VERTICAL"),
             left: prompt("<SET"), right: flightData.isCalibrated ? action("RESET") : [])
@@ -611,6 +621,17 @@ extension MCDUController {
         case (false, 1): show(.credits)
         case (true, 2):
             flightData.displayStyle = flightData.displayStyle == .airbus ? .boeing : .airbus
+        case (false, 2):
+            // CLR / DELETE removes the imported X-Plane data.
+            if isClearCommand, XPlaneNavData.shared.isInstalled {
+                clearScratchpad()
+                XPlaneNavData.shared.remove()
+                refreshPlan()
+                flash("XP DATA REMOVED")
+            }
+        case (false, 3):
+            guard !isImportingNavData else { return }
+            isShowingImporter = true
         case (true, 3):
             guard routePlanner.transportMode.isRoad else { return flash("NOT ALLOWED") }
             flightData.rollSource = flightData.rollSource == .lateralAcceleration ? .tilt : .lateralAcceleration
@@ -702,6 +723,8 @@ extension MCDUController {
             "ODBL 1.0.",
             "AIRPORTS, RWYS, NAVAIDS:",
             "OURAIRPORTS",
+            "(PUBLIC DOMAIN).",
+            "US PROCEDURES: FAA CIFP",
             "(PUBLIC DOMAIN).",
             "AIRLINE CODES: WIKIDATA",
             "TERRAIN: AWS OPEN DATA",

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The MCDU on screen, laid out like the real unit of the selected flight
 /// deck: the Airbus MCDU beside the A320 displays, the Boeing CDU beside the
@@ -54,6 +55,9 @@ struct MCDUView: View {
                     controller.close()
                 }
             })
+        .fileImporter(isPresented: $controller.isShowingImporter, allowedContentTypes: [.folder]) { result in
+            controller.importNavData(result)
+        }
         .sheet(isPresented: $controller.isShowingMap) {
             DestinationPickerView { controller.close() }
         }

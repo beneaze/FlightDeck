@@ -89,15 +89,15 @@ extension MCDUController {
     private func lineIdent(_ fix: FlightPlan.Fix, plan: FlightPlan) -> String {
         guard !style.isBoeing else { return fix.ident }
         switch fix.kind {
-        case .origin: return plan.departureRunway.map { plan.origin.icao + $0.ident } ?? fix.ident
-        case .destination: return plan.approachRunway.map { plan.destination.icao + $0.ident } ?? fix.ident
+        case .origin: return plan.departureRunway.map { plan.origin.icao + $0.designator } ?? fix.ident
+        case .destination: return plan.approachRunway.map { plan.destination.icao + $0.designator } ?? fix.ident
         default: return fix.ident
         }
     }
 
     /// A constraint in magenta, else the predicted altitude small.
     private func altitudeRuns(_ fix: FlightPlan.Fix, plannedFt: Double) -> [MCDURun] {
-        if let constraint = fix.altitudeFt, fix.kind == .approach || fix.kind == .departure {
+        if let constraint = fix.altitudeFt, [.approach, .departure, .arrival].contains(fix.kind) {
             return data(altitude(constraint), .magenta)
         }
         return data(altitude(plannedFt), style.isBoeing ? .cyan : .green, small: true)
@@ -124,11 +124,26 @@ extension MCDUController {
             case .enroute:
                 if let i = enrouteIndex(ofLeg: legIndex, in: plan), enroute.indices.contains(i) { enroute.remove(at: i) }
             case .origin, .departure:
-                guard departureRunway != nil else { return flash("NOT ALLOWED") }
-                departureRunway = nil
+                if sidName != nil {
+                    sidName = nil
+                    sidTransition = nil
+                } else if departureRunway != nil {
+                    departureRunway = nil
+                } else {
+                    return flash("NOT ALLOWED")
+                }
+            case .arrival:
+                starName = nil
+                starTransition = nil
             case .approach, .destination:
-                guard approachRunway != nil else { return flash("NOT ALLOWED") }
-                approachRunway = nil
+                if approachName != nil {
+                    approachName = nil
+                    approachVia = nil
+                } else if approachRunway != nil {
+                    approachRunway = nil
+                } else {
+                    return flash("NOT ALLOWED")
+                }
             }
             refreshPlan()
             return
@@ -150,14 +165,16 @@ extension MCDUController {
 
         switch fix.kind {
         case .origin, .departure: show(.departure)
-        case .approach, .destination: show(.arrival)
+        case .arrival, .approach, .destination: show(.arrival)
         case .enroute: put(fix.ident)
         }
     }
 
     /// Legs before the entered waypoints: the origin, and the climb-out
     /// when a runway is set.
-    private func departureLegCount(_ plan: FlightPlan) -> Int { plan.departureRunway == nil ? 1 : 2 }
+    private func departureLegCount(_ plan: FlightPlan) -> Int {
+        plan.legs.prefix { $0.kind == .origin || $0.kind == .departure }.count
+    }
 
     private func enrouteIndex(ofLeg leg: Int, in plan: FlightPlan) -> Int? {
         let i = leg - departureLegCount(plan)
@@ -170,14 +187,193 @@ extension MCDUController {
 
     // MARK: - DEPARTURES / ARRIVALS
 
-    private static let runwaysPerPage = 4
-
-    private func visibleRunways(at airport: Airport) -> [Runway] {
-        Array(NavDatabase.shared.runways(at: airport).dropFirst(subpage * Self.runwaysPerPage).prefix(Self.runwaysPerPage))
+    /// One selectable line of a DEPARTURES / ARRIVALS list.
+    struct ProcedureItem {
+        let title: String
+        var detail = ""
+        var label = ""
+        let isSelected: Bool
+        let select: () -> Void
     }
+
+    static let procedureLinesPerPage = 4
 
     private func lengthText(_ runway: Runway) -> String {
         style.isBoeing ? "\(Int(runway.lengthFt))FT" : "\(Int((runway.lengthFt * 0.3048).rounded()))M"
+    }
+
+    private func approachTitle(_ ident: String) -> String {
+        ProcedureDatabase.approachName(ident, boeing: style.isBoeing)
+    }
+
+    // Departure lists
+
+    private var runwayItems: [ProcedureItem] {
+        guard let origin else { return [] }
+        return NavDatabase.shared.runways(at: origin).map { runway in
+            ProcedureItem(title: runway.designator, detail: lengthText(runway),
+                          label: String(format: "CRS%03.0f", runway.headingDeg),
+                          isSelected: runway == departureRunway) { [unowned self] in
+                departureRunway = departureRunway == runway ? nil : runway
+                // A SID that does not serve the new runway goes.
+                if let sid = sidName, !procedures(at: origin).sids(from: departureRunway).contains(sid) {
+                    sidName = nil
+                    sidTransition = nil
+                }
+                refreshPlan()
+                if departureRunway != nil, !procedures(at: origin).sids(from: departureRunway).isEmpty {
+                    departureList = .sids
+                    subpage = 0
+                }
+            }
+        }
+    }
+
+    private var sidItems: [ProcedureItem] {
+        let available = procedures(at: origin).sids(from: departureRunway)
+        var items = [ProcedureItem(title: "NO SID", isSelected: sidName == nil) { [unowned self] in
+            sidName = nil
+            sidTransition = nil
+            refreshPlan()
+        }]
+        items += available.map { name in
+            ProcedureItem(title: name, isSelected: name == sidName) { [unowned self] in
+                sidName = sidName == name ? nil : name
+                sidTransition = nil
+                refreshPlan()
+                if sidName != nil, let t = procedures(at: origin).sids[name],
+                   !TerminalProcedures.enrouteTransitions(t).isEmpty {
+                    departureList = .transitions
+                    subpage = 0
+                }
+            }
+        }
+        return items
+    }
+
+    private var sidTransitionItems: [ProcedureItem] {
+        guard let sidName, let t = procedures(at: origin).sids[sidName] else { return [] }
+        return [ProcedureItem(title: "NO TRANS", isSelected: sidTransition == nil) { [unowned self] in
+            sidTransition = nil
+            refreshPlan()
+        }] + TerminalProcedures.enrouteTransitions(t).map { name in
+            ProcedureItem(title: name, isSelected: name == sidTransition) { [unowned self] in
+                sidTransition = sidTransition == name ? nil : name
+                refreshPlan()
+            }
+        }
+    }
+
+    // Arrival lists
+
+    private var approachItems: [ProcedureItem] {
+        guard let destination else { return [] }
+        let published = procedures(at: destination).approaches.keys.sorted {
+            // Precision approaches first, then by runway.
+            let order = "IRHLDVSNQBXUPG"
+            let a = order.firstIndex(of: $0.first ?? "Z") ?? order.endIndex
+            let b = order.firstIndex(of: $1.first ?? "Z") ?? order.endIndex
+            return a != b ? a < b : $0 < $1
+        }
+        if !published.isEmpty {
+            return published.map { ident in
+                ProcedureItem(title: approachTitle(ident),
+                              label: ProcedureDatabase.approachRunway(ident).map { "RWY " + $0 } ?? "CIRCLING",
+                              isSelected: ident == approachName) { [unowned self] in
+                    chooseApproach(approachName == ident ? nil : ident)
+                    if approachName != nil, !procedures(at: destination).vias(ident).isEmpty {
+                        arrivalList = .vias
+                        subpage = 0
+                    }
+                }
+            }
+        }
+        // No published approaches: a straight-in 3° final to each runway.
+        return NavDatabase.shared.runways(at: destination).map { runway in
+            ProcedureItem(title: runway.fixIdent, detail: lengthText(runway),
+                          label: String(format: "CRS%03.0f  3.0°", runway.headingDeg),
+                          isSelected: approachName == nil && runway == approachRunway) { [unowned self] in
+                approachName = nil
+                approachVia = nil
+                approachRunway = approachRunway == runway ? nil : runway
+                refreshPlan()
+            }
+        }
+    }
+
+    private var viaItems: [ProcedureItem] {
+        guard let approachName else { return [] }
+        return [ProcedureItem(title: "NO VIA", isSelected: approachVia == nil) { [unowned self] in
+            approachVia = nil
+            refreshPlan()
+        }] + procedures(at: destination).vias(approachName).map { name in
+            ProcedureItem(title: name, isSelected: name == approachVia) { [unowned self] in
+                approachVia = approachVia == name ? nil : name
+                refreshPlan()
+            }
+        }
+    }
+
+    private var starItems: [ProcedureItem] {
+        [ProcedureItem(title: "NO STAR", isSelected: starName == nil) { [unowned self] in
+            starName = nil
+            starTransition = nil
+            refreshPlan()
+        }] + procedures(at: destination).stars.keys.sorted().map { name in
+            ProcedureItem(title: name, isSelected: name == starName) { [unowned self] in
+                starName = starName == name ? nil : name
+                starTransition = nil
+                refreshPlan()
+                if starName != nil, let t = procedures(at: destination).stars[name],
+                   !TerminalProcedures.enrouteTransitions(t).isEmpty {
+                    arrivalList = .transitions
+                    subpage = 0
+                }
+            }
+        }
+    }
+
+    private var starTransitionItems: [ProcedureItem] {
+        guard let starName, let t = procedures(at: destination).stars[starName] else { return [] }
+        return [ProcedureItem(title: "NO TRANS", isSelected: starTransition == nil) { [unowned self] in
+            starTransition = nil
+            refreshPlan()
+        }] + TerminalProcedures.enrouteTransitions(t).map { name in
+            ProcedureItem(title: name, isSelected: name == starTransition) { [unowned self] in
+                starTransition = starTransition == name ? nil : name
+                refreshPlan()
+            }
+        }
+    }
+
+    /// The lists on screen: Airbus one (left), Boeing two (left, right).
+    var procedureLists: (left: [ProcedureItem], right: [ProcedureItem]) {
+        switch (page, style.isBoeing) {
+        case (.departure, false):
+            switch departureList {
+            case .runways: return (runwayItems, [])
+            case .sids: return (sidItems, [])
+            case .transitions: return (sidTransitionItems, [])
+            }
+        case (.departure, true):
+            return (departureList == .transitions ? sidTransitionItems : sidItems, runwayItems)
+        case (.arrival, false):
+            switch arrivalList {
+            case .approaches: return (approachItems, [])
+            case .vias: return (viaItems, [])
+            case .stars: return (starItems, [])
+            case .transitions: return (starTransitionItems, [])
+            }
+        case (.arrival, true):
+            return (arrivalList == .transitions ? starTransitionItems : starItems,
+                    arrivalList == .vias ? viaItems : approachItems)
+        default:
+            return ([], [])
+        }
+    }
+
+    private func visible(_ items: [ProcedureItem]) -> [ProcedureItem] {
+        Array(items.dropFirst(subpage * Self.procedureLinesPerPage).prefix(Self.procedureLinesPerPage))
     }
 
     func departurePage(_ rows: inout [MCDULine]) -> [MCDURun] {
@@ -186,8 +382,24 @@ extension MCDUController {
             set(&rows, 5, left: prompt(style.isBoeing ? "<INDEX" : "<RETURN"))
             return titleRuns(style.title(.departure))
         }
-        procedurePage(&rows, airport: origin, selected: departureRunway, isDeparture: true)
-        return style.isBoeing ? titleRuns(origin.icao + " DEPARTURES") : titleRuns(style.title(.departure), origin.icao)
+        if style.isBoeing {
+            boeingProcedurePage(&rows, leftHeader: departureList == .transitions ? "TRANS" : "SIDS",
+                                rightHeader: "RUNWAYS",
+                                leftSwitch: departureList == .transitions ? "<SIDS" : (sidName != nil ? "<TRANS" : nil),
+                                rightSwitch: nil)
+            return titleRuns(origin.icao + " DEPARTURES")
+        }
+        let header: String
+        switch departureList {
+        case .runways: header = "AVAILABLE RUNWAYS"
+        case .sids: header = "SIDS"
+        case .transitions: header = "TRANS"
+        }
+        airbusProcedurePage(&rows, labels: ("RWY", "SID", "TRANS"),
+                            values: (departureRunway?.designator, sidName ?? (departureRunway == nil ? nil : "NONE"),
+                                     sidTransition ?? (sidName == nil ? nil : "NONE")),
+                            header: header)
+        return titleRuns(style.title(.departure), origin.icao)
     }
 
     func arrivalPage(_ rows: inout [MCDULine]) -> [MCDURun] {
@@ -196,81 +408,126 @@ extension MCDUController {
             set(&rows, 5, left: prompt(style.isBoeing ? "<INDEX" : "<RETURN"))
             return titleRuns(style.title(.arrival))
         }
-        procedurePage(&rows, airport: destination, selected: approachRunway, isDeparture: false)
-        return style.isBoeing ? titleRuns(destination.icao + " ARRIVALS") : titleRuns(style.title(.arrival), destination.icao)
-    }
-
-    /// Both units list the runways (for an arrival, the runway approaches)
-    /// and the procedures. Airbus: the selection on the first line, the
-    /// list below with its course. Boeing: procedures left, runways right,
-    /// `<SEL>` beside the chosen one.
-    private func procedurePage(_ rows: inout [MCDULine], airport: Airport, selected: Runway?, isDeparture: Bool) {
-        let runways = visibleRunways(at: airport)
-        let name: (Runway) -> String = { isDeparture ? $0.ident : $0.fixIdent }
-        if runways.isEmpty, subpage == 0 {
-            set(&rows, 2, center: data("NO RWY IN DATA BASE", .amber, small: true))
-        }
         if style.isBoeing {
-            for (row, runway) in runways.enumerated() {
-                let isSelected = runway == selected
-                set(&rows, row,
-                    labelLeft: row == 0 ? label(isDeparture ? "SIDS" : "STARS") : [],
-                    labelRight: row == 0 ? label(isDeparture ? "RUNWAYS" : "APPROACHES") : [],
-                    left: row == 0 ? data(isDeparture ? "NONE" : "NONE", .white, small: true) : [],
-                    right: isSelected ? data("<SEL> ", .green, small: true) + data(name(runway), .green)
-                                      : prompt(name(runway)))
-            }
-            set(&rows, 4, labelLeft: label(isDeparture ? "NO SIDS IN DATA BASE" : "NO STARS IN DATA BASE"))
-            set(&rows, 5, left: prompt("<INDEX"), right: prompt("ROUTE>"))
-        } else {
-            let selection = selected.map { data(name($0), .green) } ?? data("------", .white)
-            rows[0] = MCDULine(left: label(isDeparture ? "RWY" : "APPR"), center: label(isDeparture ? "SID" : "VIA"),
-                               right: label(isDeparture ? "TRANS" : "STAR"))
-            rows[1] = MCDULine(left: selection, center: data("NONE", .white, small: true),
-                               right: data("NONE", .white, small: true))
-            for (i, runway) in runways.enumerated() {
-                let course = String(format: "CRS%03.0f", runway.headingDeg)
-                set(&rows, i + 1,
-                    labelLeft: label(course + (isDeparture ? "" : "  3.0°")),
-                    left: [MCDURun(text: "<" + name(runway), color: runway == selected ? .green : .white)],
-                    right: data(lengthText(runway), .white, small: true))
-            }
-            set(&rows, 5, labelRight: label(isDeparture ? "NO SID IN DATA BASE" : "NO STAR IN DATA BASE"),
-                left: prompt("<RETURN"), right: prompt("F-PLN>"))
+            boeingProcedurePage(&rows, leftHeader: arrivalList == .transitions ? "TRANS" : "STARS",
+                                rightHeader: arrivalList == .vias ? "TRANS" : "APPROACHES",
+                                leftSwitch: arrivalList == .transitions ? "<STARS" : (starName != nil ? "<TRANS" : nil),
+                                rightSwitch: arrivalList == .vias ? "APPROACHES>" : (approachName != nil ? "TRANS>" : nil))
+            return titleRuns(destination.icao + " ARRIVALS")
         }
+        let header: String
+        switch arrivalList {
+        case .approaches: header = "APPR AVAILABLE"
+        case .vias: header = "APPR VIAS"
+        case .stars: header = "STARS"
+        case .transitions: header = "TRANS"
+        }
+        let approachText = approachName.map(approachTitle) ?? approachRunway?.fixIdent
+        airbusProcedurePage(&rows, labels: ("APPR", "VIA", "STAR"),
+                            values: (approachText, approachVia ?? (approachName == nil ? nil : "NONE"),
+                                     starName.map { name in starTransition.map { name + "." + $0 } ?? name } ?? "NONE"),
+                            header: header)
+        return titleRuns(style.title(.arrival), destination.icao)
     }
 
-    func departureSelect(left: Bool, index: Int) { procedureSelect(left: left, index: index, isDeparture: true) }
-    func arrivalSelect(left: Bool, index: Int) { procedureSelect(left: left, index: index, isDeparture: false) }
+    /// Airbus: the selections on the first line, one list below (R1 steps
+    /// to the next list, L1 back to the first), its name above the bottom.
+    private func airbusProcedurePage(_ rows: inout [MCDULine], labels: (String, String, String),
+                                     values: (String?, String?, String?), header: String) {
+        func value(_ v: String?) -> [MCDURun] { v.map { data(String($0.prefix(8)), .green) } ?? data("------", .white) }
+        rows[0] = MCDULine(left: label(labels.0), center: label(labels.1), right: label(labels.2))
+        rows[1] = MCDULine(left: value(values.0), center: value(values.1), right: value(values.2) + prompt(">"))
+        let items = visible(procedureLists.left)
+        if items.isEmpty, subpage == 0 {
+            set(&rows, 2, center: data(page == .departure ? "NO RWY IN DATA BASE" : "NONE IN DATA BASE",
+                                       .amber, small: true))
+        }
+        for (i, item) in items.enumerated() {
+            set(&rows, i + 1, labelLeft: label(item.label),
+                left: [MCDURun(text: (item.isSelected ? " " : "<") + item.title, color: item.isSelected ? .green : .white)],
+                right: item.detail.isEmpty ? [] : data(item.detail, .white, small: true))
+        }
+        set(&rows, 5, labelLeft: label(header), left: prompt("<RETURN"), right: prompt("F-PLN>"))
+    }
 
-    private func procedureSelect(left: Bool, index: Int, isDeparture: Bool) {
+    /// Boeing: procedures left, runways or approaches right, `<SEL>` beside
+    /// the chosen ones; line 5 switches a column to its transitions.
+    private func boeingProcedurePage(_ rows: inout [MCDULine], leftHeader: String, rightHeader: String,
+                                     leftSwitch: String?, rightSwitch: String?) {
+        let lists = procedureLists
+        let left = visible(lists.left), right = visible(lists.right)
+        for row in 0..<Self.procedureLinesPerPage {
+            var leftRuns: [MCDURun] = [], rightRuns: [MCDURun] = []
+            if row < left.count {
+                let item = left[row]
+                leftRuns = item.isSelected ? data(item.title, .green) + data(" <SEL>", .green, small: true)
+                                           : prompt(item.title)
+            }
+            if row < right.count {
+                let item = right[row]
+                rightRuns = item.isSelected ? data("<SEL> ", .green, small: true) + data(item.title, .green)
+                                            : prompt(item.title)
+            }
+            set(&rows, row, labelLeft: row == 0 ? label(leftHeader) : [],
+                labelRight: row == 0 ? label(rightHeader) : [], left: leftRuns, right: rightRuns)
+        }
+        set(&rows, 4, left: leftSwitch.map(prompt) ?? [], right: rightSwitch.map(prompt) ?? [])
+        set(&rows, 5, left: prompt("<INDEX"), right: prompt("ROUTE>"))
+    }
+
+    func departureSelect(left: Bool, index: Int) { procedureSelect(left: left, index: index) }
+    func arrivalSelect(left: Bool, index: Int) { procedureSelect(left: left, index: index) }
+
+    private func procedureSelect(left: Bool, index: Int) {
         if index == 5 {
+            show(left && style.isBoeing ? .depArr : .flightPlan)
+            return
+        }
+        let lists = procedureLists
+        if style.isBoeing {
+            if index == 4 {
+                if left {
+                    if page == .departure {
+                        departureList = departureList == .transitions ? .sids : (sidName != nil ? .transitions : .sids)
+                    } else {
+                        arrivalList = arrivalList == .transitions ? .stars : (starName != nil ? .transitions : .stars)
+                    }
+                } else if page == .arrival {
+                    arrivalList = arrivalList == .vias ? .approaches : (approachName != nil ? .vias : .approaches)
+                }
+                subpage = 0
+                return
+            }
+            let items = visible(left ? lists.left : lists.right)
+            guard items.indices.contains(index) else { return }
+            items[index].select()
+            return
+        }
+        // Airbus.
+        if index == 0 {
             if left {
-                show(style.isBoeing ? .depArr : .flightPlan)
+                if page == .departure { departureList = .runways } else { arrivalList = .approaches }
+            } else if page == .departure {
+                switch departureList {
+                case .runways: departureList = .sids
+                case .sids: departureList = sidName != nil ? .transitions : .runways
+                case .transitions: departureList = .runways
+                }
             } else {
-                show(.flightPlan)
+                switch arrivalList {
+                case .approaches: arrivalList = approachName != nil ? .vias : .stars
+                case .vias: arrivalList = .stars
+                case .stars: arrivalList = starName != nil ? .transitions : .approaches
+                case .transitions: arrivalList = .approaches
+                }
             }
+            subpage = 0
             return
         }
-        guard let airport = isDeparture ? origin : destination else { return }
-        let runways = visibleRunways(at: airport)
-        // Airbus: list on the left from line 2; Boeing: runways on the right from line 1.
-        let row = style.isBoeing ? index : index - 1
-        guard left != style.isBoeing, runways.indices.contains(row) else {
-            if isClearCommand {
-                clearScratchpad()
-                if isDeparture { departureRunway = nil } else { approachRunway = nil }
-                refreshPlan()
-            }
-            return
-        }
-        let runway = runways[row]
-        if isDeparture {
-            departureRunway = departureRunway == runway ? nil : runway
-        } else {
-            approachRunway = approachRunway == runway ? nil : runway
-        }
-        refreshPlan()
+        guard left else { return }
+        let items = visible(lists.left)
+        guard items.indices.contains(index - 1) else { return }
+        items[index - 1].select()
     }
 
     // MARK: - DEP/ARR INDEX (Boeing)

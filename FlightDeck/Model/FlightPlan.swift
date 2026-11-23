@@ -90,6 +90,8 @@ struct FlightPlan: Codable, Identifiable, Hashable {
             case departure
             /// A waypoint entered by the crew.
             case enroute
+            /// A STAR's fixes.
+            case arrival
             /// The approach: intercept and final approach fix.
             case approach
             /// The arrival airport, or its runway threshold.
@@ -114,6 +116,13 @@ struct FlightPlan: Codable, Identifiable, Hashable {
         var coordinate: CLLocationCoordinate2D { .init(latitude: latitude, longitude: longitude) }
     }
 
+    /// A published procedure as flown: its name and its fixes.
+    struct ProcedureRoute: Codable, Hashable {
+        /// "CIITY3", "CIITY3.DEDHD", "I28R", …
+        let name: String
+        let legs: [Fix]
+    }
+
     let id: UUID
     /// As entered, e.g. "LH400"; nil for a flight planned by airports alone.
     var flightNumber: String?
@@ -131,11 +140,16 @@ struct FlightPlan: Codable, Identifiable, Hashable {
     let departureRunway: Runway?
     let approachRunway: Runway?
     let enroute: [Fix]?
+    /// Published SID, STAR and approach, where chosen.
+    let sid: ProcedureRoute?
+    let star: ProcedureRoute?
+    let approach: ProcedureRoute?
 
     init(id: UUID = UUID(), flightNumber: String?, callsign: String?, date: Date,
          origin: Airport, destination: Airport, cruiseAltitudeFt: Double? = nil,
          route: [RoutePoint]? = nil, source: RouteSource = .greatCircle,
-         departureRunway: Runway? = nil, approachRunway: Runway? = nil, enroute: [Fix] = []) {
+         departureRunway: Runway? = nil, approachRunway: Runway? = nil, enroute: [Fix] = [],
+         sid: ProcedureRoute? = nil, star: ProcedureRoute? = nil, approach: ProcedureRoute? = nil) {
         self.id = id
         self.flightNumber = flightNumber
         self.callsign = callsign
@@ -145,11 +159,16 @@ struct FlightPlan: Codable, Identifiable, Hashable {
         self.departureRunway = departureRunway
         self.approachRunway = approachRunway
         self.enroute = enroute.isEmpty ? nil : enroute
+        self.sid = sid
+        self.star = star
+        self.approach = approach
         let isEntered = departureRunway != nil || approachRunway != nil || !enroute.isEmpty
+            || sid != nil || star != nil || approach != nil
         let points: [RoutePoint]
         if isEntered {
             let fixes = Self.legs(origin: origin, destination: destination, departureRunway: departureRunway,
-                                  approachRunway: approachRunway, enroute: enroute)
+                                  approachRunway: approachRunway, enroute: enroute,
+                                  sid: sid, star: star, approach: approach)
             points = Self.densified(fixes.map { RoutePoint(latitude: $0.latitude, longitude: $0.longitude,
                                                            altitudeFt: nil) })
             self.source = .entered
@@ -210,7 +229,8 @@ struct FlightPlan: Codable, Identifiable, Hashable {
     /// airports.
     var legs: [Fix] {
         Self.legs(origin: origin, destination: destination, departureRunway: departureRunway,
-                  approachRunway: approachRunway, enroute: enroute ?? [])
+                  approachRunway: approachRunway, enroute: enroute ?? [],
+                  sid: sid, star: star, approach: approach)
     }
 
     /// Climb straight ahead after take-off to 1500 ft above the runway.
@@ -221,9 +241,32 @@ struct FlightPlan: Codable, Identifiable, Hashable {
     static let interceptNm = 12.0
 
     static func legs(origin: Airport, destination: Airport, departureRunway: Runway?,
-                     approachRunway: Runway?, enroute: [Fix]) -> [Fix] {
+                     approachRunway: Runway?, enroute: [Fix],
+                     sid: ProcedureRoute? = nil, star: ProcedureRoute? = nil,
+                     approach: ProcedureRoute? = nil) -> [Fix] {
         var legs: [Fix] = []
-        if let runway = departureRunway {
+        // A fix repeated where two parts meet (the SID's last fix as the
+        // first waypoint, a STAR ending at the approach's first fix) is
+        // listed once.
+        func append(_ more: [Fix]) {
+            for fix in more {
+                if let last = legs.last, last.ident == fix.ident,
+                   GreatCircle.distanceNm(last.coordinate, fix.coordinate) < 1 {
+                    if fix.altitudeFt != nil, last.altitudeFt == nil { legs[legs.count - 1] = fix }
+                    continue
+                }
+                legs.append(fix)
+            }
+        }
+        if let runway = departureRunway, let sid, !sid.legs.isEmpty {
+            legs.append(Fix(ident: runway.fixIdent, coordinate: runway.coordinate, kind: .origin,
+                            altitudeFt: runway.elevationFt ?? origin.elevationFt))
+            append(sid.legs)
+        } else if let sid, !sid.legs.isEmpty {
+            legs.append(Fix(ident: origin.icao, coordinate: origin.coordinate, kind: .origin,
+                            altitudeFt: origin.elevationFt))
+            append(sid.legs)
+        } else if let runway = departureRunway {
             let elevation = runway.elevationFt ?? origin.elevationFt
             legs.append(Fix(ident: runway.fixIdent, coordinate: runway.coordinate, kind: .origin,
                             altitudeFt: elevation))
@@ -239,8 +282,11 @@ struct FlightPlan: Codable, Identifiable, Hashable {
             legs.append(Fix(ident: origin.icao, coordinate: origin.coordinate, kind: .origin,
                             altitudeFt: origin.elevationFt))
         }
-        legs.append(contentsOf: enroute)
-        if let runway = approachRunway {
+        append(enroute)
+        if let star { append(star.legs) }
+        if let approach, !approach.legs.isEmpty {
+            append(approach.legs)
+        } else if let runway = approachRunway {
             let elevation = runway.elevationFt ?? destination.elevationFt
             let outbound = (runway.headingDeg + 180).truncatingRemainder(dividingBy: 360)
             func onFinal(_ nm: Double) -> CLLocationCoordinate2D {
@@ -249,9 +295,9 @@ struct FlightPlan: Codable, Identifiable, Hashable {
             func glidepath(_ nm: Double) -> Double {
                 ((elevation + nm / descentNmPer1000Ft * 1_000) / 100).rounded() * 100
             }
-            legs.append(Fix(ident: "CI" + runway.ident, coordinate: onFinal(interceptNm), kind: .approach,
+            legs.append(Fix(ident: "CI" + runway.designator, coordinate: onFinal(interceptNm), kind: .approach,
                             altitudeFt: glidepath(interceptNm)))
-            legs.append(Fix(ident: "FF" + runway.ident, coordinate: onFinal(finalApproachFixNm), kind: .approach,
+            legs.append(Fix(ident: "FF" + runway.designator, coordinate: onFinal(finalApproachFixNm), kind: .approach,
                             altitudeFt: glidepath(finalApproachFixNm)))
             legs.append(Fix(ident: runway.fixIdent, coordinate: runway.threshold, kind: .destination,
                             altitudeFt: elevation + 50))

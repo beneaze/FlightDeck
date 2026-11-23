@@ -46,7 +46,7 @@ Works in portrait and landscape, on iPhone and iPad, including Split View.
 
 FlightDeck is for entertainment. It is not a navigation aid or a certified instrument. Set it up before you drive, keep your eyes on the road and follow posted signs and traffic laws.
 
-Speed limits © OpenStreetMap contributors (ODbL). Flight routes: adsbdb.com (Virtual Radar Server standing data, CC0) and hexdb.io. Terrain: AWS Open Data Terrain Tiles. Airports: OurAirports.
+Speed limits © OpenStreetMap contributors (ODbL). Flight routes: adsbdb.com (Virtual Radar Server standing data, CC0) and hexdb.io. US procedures: FAA CIFP. Terrain: AWS Open Data Terrain Tiles. Airports: OurAirports.
 
 ## Keywords [100]
 cockpit,pfd,efis,glass cockpit,pilot,aviation,dashboard,speedometer,hud,altimeter,attitude,gps,car
