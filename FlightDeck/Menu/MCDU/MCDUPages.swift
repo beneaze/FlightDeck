@@ -20,7 +20,10 @@ extension MCDUController {
         case .menu: title = menuPage(&rows)
         case .route: title = routePlanner.transportMode == .plane ? flightInitPage(&rows) : roadRoutePage(&rows)
         case .destSearch: title = searchPage(&rows)
-        case .flightPlan: title = flightPlanPage(&rows)
+        case .flightPlan: title = isEditingFlightPlan ? plannedFlightPlanPage(&rows) : flightPlanPage(&rows)
+        case .departure: title = departurePage(&rows)
+        case .arrival: title = arrivalPage(&rows)
+        case .depArr: title = depArrPage(&rows)
         case .progress: title = progressPage(&rows)
         case .settings: title = settingsPage(&rows)
         case .flights: title = flightsPage(&rows)
@@ -45,7 +48,14 @@ extension MCDUController {
             }
         case .destSearch: searchSelect(left: left, index: index)
         case .flightPlan:
-            if left, index == 5 { show(.route) }
+            if isEditingFlightPlan {
+                plannedFlightPlanSelect(left: left, index: index)
+            } else if left, index == 5 {
+                show(.route)
+            }
+        case .departure: departureSelect(left: left, index: index)
+        case .arrival: arrivalSelect(left: left, index: index)
+        case .depArr: depArrSelect(left: left, index: index)
         case .progress:
             if left, index == 5 { show(.flightPlan) }
         case .settings: settingsSelect(left: left, index: index)
@@ -57,18 +67,18 @@ extension MCDUController {
 
     // MARK: - Building blocks
 
-    private func label(_ text: String) -> [MCDURun] { [MCDURun(text: text, color: .white, small: true)] }
-    private func prompt(_ text: String) -> [MCDURun] { [MCDURun(text: text, color: .white)] }
-    private func data(_ text: String, _ color: MCDUColor = .green, small: Bool = false) -> [MCDURun] {
+    func label(_ text: String) -> [MCDURun] { [MCDURun(text: text, color: .white, small: true)] }
+    func prompt(_ text: String) -> [MCDURun] { [MCDURun(text: text, color: .white)] }
+    func data(_ text: String, _ color: MCDUColor = .green, small: Bool = false) -> [MCDURun] {
         [MCDURun(text: text, color: color, small: small)]
     }
-    private func boxes(_ count: Int) -> [MCDURun] {
+    func boxes(_ count: Int) -> [MCDURun] {
         [MCDURun(text: String(repeating: "▯", count: count), color: .amber)]
     }
-    private func action(_ text: String) -> [MCDURun] {
+    func action(_ text: String) -> [MCDURun] {
         [MCDURun(text: text, color: .white), MCDURun(text: "*", color: .amber)]
     }
-    private func titleRuns(_ text: String, _ extra: String? = nil) -> [MCDURun] {
+    func titleRuns(_ text: String, _ extra: String? = nil) -> [MCDURun] {
         var runs = [MCDURun(text: text, color: .white)]
         if let extra { runs.append(MCDURun(text: " " + extra, color: .green)) }
         return runs
@@ -76,7 +86,7 @@ extension MCDUController {
 
     /// A choice among options: the selected one large green, the others
     /// small white.
-    private func choice(_ options: [String], selected: Int) -> [MCDURun] {
+    func choice(_ options: [String], selected: Int) -> [MCDURun] {
         var runs: [MCDURun] = []
         for (i, option) in options.enumerated() {
             if i > 0 { runs.append(MCDURun(text: "/", color: .white, small: true)) }
@@ -85,7 +95,7 @@ extension MCDUController {
         return runs
     }
 
-    private func set(_ rows: inout [MCDULine], _ pair: Int,
+    func set(_ rows: inout [MCDULine], _ pair: Int,
                      labelLeft: [MCDURun] = [], labelRight: [MCDURun] = [],
                      left: [MCDURun] = [], right: [MCDURun] = [], center: [MCDURun] = []) {
         rows[pair * 2] = MCDULine(left: labelLeft, right: labelRight)
@@ -106,16 +116,16 @@ extension MCDUController {
         "\(Int((kts * flightData.speedUnit.perKnot).rounded()))\(speedUnitLabel)"
     }
 
-    private func altitude(_ feet: Double) -> String {
+    func altitude(_ feet: Double) -> String {
         if routePlanner.transportMode == .plane, feet >= 10_000 { return "FL\(Int((feet / 100).rounded()))" }
         return "\(Int((feet / 10).rounded()) * 10)FT"
     }
 
-    private func distance(_ nm: Double) -> String {
+    func distance(_ nm: Double) -> String {
         nm < 10 ? String(format: "%.1fNM", nm) : "\(Int(nm.rounded()))NM"
     }
 
-    private func utc(_ date: Date) -> String {
+    func utc(_ date: Date) -> String {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
         let c = calendar.dateComponents([.hour, .minute], from: date)
@@ -127,7 +137,7 @@ extension MCDUController {
         return String(format: "%d:%02d", minutes / 60, minutes % 60)
     }
 
-    private static let months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+    static let months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
                                  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
     private func dayMonth(_ date: Date) -> String {
@@ -205,13 +215,13 @@ extension MCDUController {
         let plan = draftPlan
         let fromTo: [MCDURun]
         if let origin, let destination {
-            fromTo = data("\(origin.code)/\(destination.code)", .cyan)
+            fromTo = data("\(origin.icao)/\(destination.icao)", .cyan)
         } else if let origin {
-            fromTo = data(origin.code, .cyan) + data("/", .white) + boxes(3)
+            fromTo = data(origin.icao, .cyan) + data("/", .white) + boxes(4)
         } else if let destination {
-            fromTo = boxes(3) + data("/", .white) + data(destination.code, .cyan)
+            fromTo = boxes(4) + data("/", .white) + data(destination.icao, .cyan)
         } else {
-            fromTo = boxes(3) + data("/", .white) + boxes(3)
+            fromTo = boxes(4) + data("/", .white) + boxes(4)
         }
         set(&rows, 0, labelLeft: label("FLT NBR"), labelRight: label("FROM/TO"),
             left: isLookingUp ? data("SEARCHING", .white, small: true)
@@ -230,10 +240,10 @@ extension MCDUController {
 
         if let plan {
             let path: [MCDURun]
-            if case .archive(let flownOn) = plan.source {
-                path = data("FLOWN " + flownDay(flownOn), .green)
-            } else {
-                path = data("GREAT CIRCLE", .green)
+            switch plan.source {
+            case .archive(let flownOn): path = data("FLOWN " + flownDay(flownOn), .green)
+            case .entered: path = data(style.isBoeing ? "RTE LEGS" : "F-PLN", .green)
+            case .greatCircle: path = data("GREAT CIRCLE", .green)
             }
             set(&rows, 2, labelLeft: label("PATH"), labelRight: label("DIST"),
                 left: path, right: data(distance(plan.totalDistanceNm), .green))
@@ -243,9 +253,7 @@ extension MCDUController {
         }
 
         // Offline data: download, progress, ready.
-        let readyPack = plan.flatMap { p in
-            packs.packs.first { $0.isComplete && $0.plan.origin == p.origin && $0.plan.destination == p.destination }
-        }
+        let readyPack = self.readyPack
         let offline: [MCDURun]
         if let progress = packs.progress {
             offline = data("DNLD \(progress.done)/\(progress.total)", .green)
@@ -260,14 +268,18 @@ extension MCDUController {
 
         let active = routePlanner.flightPlan
         let six: [MCDURun]
+        var sixLabel: [MCDURun] = []
         if let readyPack, readyPack.id != packs.activePackID {
             six = action("ACTIVATE")
         } else if active != nil {
-            six = data("ACTIVE ", .green, small: true) + action("CLR FLT")
+            // "ACTIVE" above: beside <STORED FLT the line has room for the
+            // prompt only.
+            sixLabel = data("ACTIVE", .green, small: true)
+            six = action("CLR FLT")
         } else {
             six = []
         }
-        set(&rows, 5, left: prompt("<STORED FLT"), right: six)
+        set(&rows, 5, labelRight: sixLabel, left: prompt("<STORED FLT"), right: six)
         return titleRuns(style.title(.route), active?.title)
     }
 
@@ -285,9 +297,7 @@ extension MCDUController {
         case (false, 0):
             if isClearCommand {
                 clearScratchpad()
-                origin = nil
-                destination = nil
-                refreshPlan()
+                setAirports(origin: nil, destination: nil)
                 return
             }
             guard let entry = takeEntry() else { return }
@@ -304,9 +314,7 @@ extension MCDUController {
                 guard let a = db.airport(code: codes.1) else { return flash("NOT IN DATA BASE") }
                 to = a
             }
-            origin = from
-            destination = to
-            refreshPlan()
+            setAirports(origin: from, destination: to)
         case (true, 1):
             guard let entry = takeEntry() else { return }
             guard let parsed = parseDate(entry) else { return flash("FORMAT ERROR") }
@@ -689,7 +697,8 @@ extension MCDUController {
             "FLIGHT TRACKS CONTAIN",
             "DATA FROM ADSB.LOL,",
             "ODBL 1.0.",
-            "AIRPORTS: OURAIRPORTS",
+            "AIRPORTS, RWYS, NAVAIDS:",
+            "OURAIRPORTS",
             "(PUBLIC DOMAIN).",
             "AIRLINE CODES: WIKIDATA",
             "TERRAIN: AWS OPEN DATA",

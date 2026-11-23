@@ -39,6 +39,8 @@ struct MCDUScreen {
 /// The pages the MCDU can show.
 enum MCDUPage: Equatable {
     case menu, route, destSearch, flightPlan, progress, settings, flights, credits
+    /// Runway and departure / approach selection, and the Boeing index.
+    case departure, arrival, depArr
 }
 
 /// Everything a key on the unit can do.
@@ -131,6 +133,11 @@ struct MCDUStyle {
         case (.flights, false): return "STORED FLIGHTS"
         case (.flights, true): return "FLIGHT PACKS"
         case (.credits, _): return "CREDITS"
+        case (.departure, false): return "DEPARTURES FROM"
+        case (.departure, true): return "DEPARTURES"
+        case (.arrival, false): return "ARRIVAL TO"
+        case (.arrival, true): return "ARRIVALS"
+        case (.depArr, _): return "DEP/ARR INDEX"
         }
     }
 
@@ -237,7 +244,7 @@ struct MCDUStyle {
         let row1: [(String, MCDUPage?)] = [("INIT\nREF", .settings), ("RTE", .route), ("CLB", nil), ("CRZ", .route),
                                            ("DES", nil)]
         for (i, k) in row1.enumerated() { fn(k.0, .page(k.1), col: i, y: 0.481) }
-        let row2: [(String, MCDUKey)] = [("MENU", .page(.menu)), ("LEGS", .page(.flightPlan)), ("DEP\nARR", .page(nil)),
+        let row2: [(String, MCDUKey)] = [("MENU", .page(.menu)), ("LEGS", .page(.flightPlan)), ("DEP\nARR", .page(.depArr)),
                                          ("HOLD", .page(nil)), ("PROG", .page(.progress)), ("EXEC", .exec)]
         for (i, k) in row2.enumerated() { fn(k.0, k.1, col: i, y: 0.543) }
         fn("N1\nLIMIT", .page(nil), col: 0, y: 0.605)

@@ -236,7 +236,7 @@ final class RoutePlanner: ObservableObject {
         dropElevationProfile()
         flightPlan = plan
         route = nil
-        destination = Destination(name: plan.destination.code, coordinate: plan.destination.coordinate)
+        destination = Destination(name: plan.destination.icao, coordinate: plan.destination.coordinate)
         errorMessage = nil
 
         // Densified, so plans saved before densifying existed draw and
@@ -255,12 +255,27 @@ final class RoutePlanner: ObservableObject {
         }
         let last = routeCoordinates.count - 1
         var plan_: [Waypoint] = []
+        // The plan's own fixes (departure, entered waypoints, approach)
+        // after the first, which is where the flight starts.
+        let legs = plan.legs, distances = plan.legDistancesNm
+        for (fix, nm) in zip(legs, distances).dropFirst() {
+            let index = fix.kind == .destination ? last : min(last, vertex(atNm: nm))
+            plan_.append(Waypoint(ident: fix.ident, coordinate: fix.coordinate, routeIndex: index))
+        }
+        // T/C and T/D slot in where they fall.
         let toc = vertex(atNm: plan.topOfClimbNm), tod = vertex(atNm: plan.topOfDescentNm)
-        if toc > 0, toc < last { plan_.append(Waypoint(ident: "T/C", coordinate: routeCoordinates[toc], routeIndex: toc)) }
-        if tod > toc, tod < last { plan_.append(Waypoint(ident: "T/D", coordinate: routeCoordinates[tod], routeIndex: tod)) }
-        plan_.append(Waypoint(ident: plan.destination.icao, coordinate: plan.destination.coordinate,
-                              routeIndex: last))
-        waypoints = plan_
+        if toc > 0, toc < last {
+            plan_.append(Waypoint(ident: "T/C", coordinate: routeCoordinates[toc], routeIndex: toc))
+        }
+        if tod > toc, tod < last {
+            plan_.append(Waypoint(ident: "T/D", coordinate: routeCoordinates[tod], routeIndex: tod))
+        }
+        waypoints = plan_.enumerated().sorted {
+            $0.element.routeIndex != $1.element.routeIndex
+                ? $0.element.routeIndex < $1.element.routeIndex
+                // A pseudo waypoint at the same vertex as a fix comes first.
+                : ($0.element.ident.hasPrefix("T/") ? 0 : 1, $0.offset) < ($1.element.ident.hasPrefix("T/") ? 0 : 1, $1.offset)
+        }.map(\.element)
         activeWaypointIndex = 0
         progressIndex = 0
         progressFraction = 0

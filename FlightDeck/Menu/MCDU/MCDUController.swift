@@ -27,6 +27,11 @@ final class MCDUController: ObservableObject {
     @Published var destination: Airport?
     /// Flight level entered by the crew; nil means the plan's own.
     @Published var cruiseLevel: Int?
+    /// Take-off runway, approach runway and the waypoints in between,
+    /// entered on the F-PLN / LEGS, DEPARTURE and ARRIVAL pages.
+    @Published var departureRunway: Runway?
+    @Published var approachRunway: Runway?
+    @Published var enroute: [FlightPlan.Fix] = []
     @Published var lookup: FlightLookupResult?
     @Published var isLookingUp = false
     /// The plan the entries above make, rebuilt whenever one changes.
@@ -130,6 +135,12 @@ final class MCDUController: ObservableObject {
         scratchpad = ""
     }
 
+    /// Put text in the scratchpad, as a line-select key does with a fix.
+    func put(_ text: String) {
+        message = nil
+        scratchpad = String(text.prefix(22))
+    }
+
     /// Take the scratchpad's entry, leaving it empty.
     func takeEntry() -> String? {
         let entry = scratchpad.trimmingCharacters(in: .whitespaces)
@@ -149,9 +160,14 @@ final class MCDUController: ObservableObject {
     var pendingPack: FlightPack? {
         guard let packs, let plan = draftPlan else { return nil }
         return packs.packs.first {
-            $0.isComplete && $0.id != packs.activePackID
-                && $0.plan.origin == plan.origin && $0.plan.destination == plan.destination
+            $0.isComplete && $0.id != packs.activePackID && $0.plan.routeKey == plan.routeKey
         }
+    }
+
+    /// A downloaded flight with the draft plan's path, active or not.
+    var readyPack: FlightPack? {
+        guard let packs, let plan = draftPlan else { return nil }
+        return packs.packs.first { $0.isComplete && $0.plan.routeKey == plan.routeKey }
     }
 
     var isExecLit: Bool { pendingPack != nil }
@@ -176,7 +192,18 @@ final class MCDUController: ObservableObject {
             date: date, origin: origin, destination: destination,
             cruiseAltitudeFt: cruiseLevel.map { Double($0) * 100 },
             route: fromLookup ? lookup?.route : nil,
-            source: fromLookup ? (lookup?.source ?? .greatCircle) : .greatCircle)
+            source: fromLookup ? (lookup?.source ?? .greatCircle) : .greatCircle,
+            departureRunway: departureRunway, approachRunway: approachRunway, enroute: enroute)
+    }
+
+    /// New airports: runways and waypoints chosen for the old ones go.
+    func setAirports(origin newOrigin: Airport?, destination newDestination: Airport?) {
+        if newOrigin != origin { departureRunway = nil }
+        if newDestination != destination { approachRunway = nil }
+        if newOrigin != origin || newDestination != destination { enroute = [] }
+        origin = newOrigin
+        destination = newDestination
+        refreshPlan()
     }
 
     /// Look a flight number up in the flight-track archive; its airports
@@ -190,10 +217,8 @@ final class MCDUController: ObservableObject {
             do {
                 let result = try await lookupProvider.lookup(flightNumber: number)
                 lookup = result
-                origin = result.origin
-                destination = result.destination
                 cruiseLevel = nil
-                refreshPlan()
+                setAirports(origin: result.origin, destination: result.destination)
             } catch let error as FlightLookupError {
                 refreshPlan()
                 switch error {
@@ -275,7 +300,12 @@ final class MCDUController: ObservableObject {
     var pageCount: Int {
         switch page {
         case .destSearch: return max(1, Int(ceil(Double(search.completions.count) / 4)))
-        case .flightPlan: return max(1, Int(ceil(Double(max(routePlanner?.waypoints.count ?? 0, 1)) / 5)))
+        case .flightPlan:
+            let lines = isEditingFlightPlan ? flightPlanLines.count : (routePlanner?.waypoints.count ?? 0)
+            return max(1, Int(ceil(Double(max(lines, 1)) / 5)))
+        case .departure: return max(1, Int(ceil(Double(origin.map { NavDatabase.shared.runways(at: $0).count } ?? 0) / 4)))
+        case .arrival:
+            return max(1, Int(ceil(Double(destination.map { NavDatabase.shared.runways(at: $0).count } ?? 0) / 4)))
         case .flights: return max(1, Int(ceil(Double(packs?.packs.count ?? 0) / 5)))
         case .credits: return max(1, Int(ceil(Double(Self.creditLines.count) / 10)))
         default: return 1

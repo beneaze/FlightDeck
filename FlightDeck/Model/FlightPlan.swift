@@ -77,6 +77,41 @@ struct FlightPlan: Codable, Identifiable, Hashable {
         /// The track this flight actually flew on an earlier day, from the
         /// open ADS-B archive (date as yyyy-MM-dd).
         case archive(flownOn: String)
+        /// Entered on the MCDU: runways, departure, waypoints, approach.
+        case entered
+    }
+
+    /// A point of an entered flight plan.
+    struct Fix: Codable, Hashable {
+        enum Kind: String, Codable {
+            /// The departure airport, or its runway.
+            case origin
+            /// The end of the runway-heading climb after take-off.
+            case departure
+            /// A waypoint entered by the crew.
+            case enroute
+            /// The approach: intercept and final approach fix.
+            case approach
+            /// The arrival airport, or its runway threshold.
+            case destination
+        }
+
+        let ident: String
+        let latitude: Double
+        let longitude: Double
+        let kind: Kind
+        /// Altitude constraint, where the leg has one.
+        let altitudeFt: Double?
+
+        init(ident: String, coordinate: CLLocationCoordinate2D, kind: Kind, altitudeFt: Double? = nil) {
+            self.ident = ident
+            latitude = coordinate.latitude
+            longitude = coordinate.longitude
+            self.kind = kind
+            self.altitudeFt = altitudeFt
+        }
+
+        var coordinate: CLLocationCoordinate2D { .init(latitude: latitude, longitude: longitude) }
     }
 
     let id: UUID
@@ -91,21 +126,40 @@ struct FlightPlan: Codable, Identifiable, Hashable {
     var cruiseAltitudeFt: Double
     let route: [RoutePoint]
     let source: RouteSource
+    /// Take-off runway, approach runway and waypoints entered on the MCDU.
+    /// Optional so packs saved before they existed still load.
+    let departureRunway: Runway?
+    let approachRunway: Runway?
+    let enroute: [Fix]?
 
     init(id: UUID = UUID(), flightNumber: String?, callsign: String?, date: Date,
          origin: Airport, destination: Airport, cruiseAltitudeFt: Double? = nil,
-         route: [RoutePoint]? = nil, source: RouteSource = .greatCircle) {
+         route: [RoutePoint]? = nil, source: RouteSource = .greatCircle,
+         departureRunway: Runway? = nil, approachRunway: Runway? = nil, enroute: [Fix] = []) {
         self.id = id
         self.flightNumber = flightNumber
         self.callsign = callsign
         self.date = date
         self.origin = origin
         self.destination = destination
-        let points = route.map(Self.densified)
-            ?? GreatCircle.points(from: origin.coordinate, to: destination.coordinate, spacingNm: 5)
-                .map { RoutePoint(latitude: $0.latitude, longitude: $0.longitude, altitudeFt: nil) }
+        self.departureRunway = departureRunway
+        self.approachRunway = approachRunway
+        self.enroute = enroute.isEmpty ? nil : enroute
+        let isEntered = departureRunway != nil || approachRunway != nil || !enroute.isEmpty
+        let points: [RoutePoint]
+        if isEntered {
+            let fixes = Self.legs(origin: origin, destination: destination, departureRunway: departureRunway,
+                                  approachRunway: approachRunway, enroute: enroute)
+            points = Self.densified(fixes.map { RoutePoint(latitude: $0.latitude, longitude: $0.longitude,
+                                                           altitudeFt: nil) })
+            self.source = .entered
+        } else {
+            points = route.map(Self.densified)
+                ?? GreatCircle.points(from: origin.coordinate, to: destination.coordinate, spacingNm: 5)
+                    .map { RoutePoint(latitude: $0.latitude, longitude: $0.longitude, altitudeFt: nil) }
+            self.source = route == nil ? .greatCircle : source
+        }
         self.route = points
-        self.source = route == nil ? .greatCircle : source
         let distance = Self.length(of: points)
         self.cruiseAltitudeFt = cruiseAltitudeFt
             ?? points.compactMap(\.altitudeFt).max().map { ($0 / 1_000).rounded() * 1_000 }
@@ -139,13 +193,104 @@ struct FlightPlan: Codable, Identifiable, Hashable {
     }
 
     /// Display name: the flight number, or the city pair.
-    var title: String { flightNumber ?? "\(origin.code)–\(destination.code)" }
+    var title: String { flightNumber ?? "\(origin.icao)–\(destination.icao)" }
 
     /// One line for lists: "SK455  OSL → CPH", or just "OSL → CPH" when the
     /// flight was planned by airports alone.
     var summary: String {
-        let pair = "\(origin.code) → \(destination.code)"
+        let pair = "\(origin.icao) → \(destination.icao)"
         return flightNumber.map { "\($0)  \(pair)" } ?? pair
+    }
+
+    // MARK: Legs
+
+    /// The plan as the MCDU lists it: origin (or its runway), the
+    /// departure, the entered waypoints, the approach and the destination
+    /// (or its runway). A plan with nothing entered is just the two
+    /// airports.
+    var legs: [Fix] {
+        Self.legs(origin: origin, destination: destination, departureRunway: departureRunway,
+                  approachRunway: approachRunway, enroute: enroute ?? [])
+    }
+
+    /// Climb straight ahead after take-off to 1500 ft above the runway.
+    static let departureClimbFt = 1_500.0
+    /// The generated approach: a 3° final from a final approach fix 5 NM
+    /// out, intercepted 12 NM out.
+    static let finalApproachFixNm = 5.0
+    static let interceptNm = 12.0
+
+    static func legs(origin: Airport, destination: Airport, departureRunway: Runway?,
+                     approachRunway: Runway?, enroute: [Fix]) -> [Fix] {
+        var legs: [Fix] = []
+        if let runway = departureRunway {
+            let elevation = runway.elevationFt ?? origin.elevationFt
+            legs.append(Fix(ident: runway.fixIdent, coordinate: runway.coordinate, kind: .origin,
+                            altitudeFt: elevation))
+            // A runway-heading climb to 1500 ft above the field, named as
+            // the units name an altitude-terminated leg: "(2900)".
+            let target = ((elevation + departureClimbFt) / 100).rounded(.up) * 100
+            let climbNm = runway.lengthNm + departureClimbFt / 1_000 * climbNmPer1000Ft
+            legs.append(Fix(ident: "(\(Int(target)))",
+                            coordinate: GreatCircle.destination(from: runway.coordinate, courseDeg: runway.headingDeg,
+                                                                distanceNm: climbNm),
+                            kind: .departure, altitudeFt: target))
+        } else {
+            legs.append(Fix(ident: origin.icao, coordinate: origin.coordinate, kind: .origin,
+                            altitudeFt: origin.elevationFt))
+        }
+        legs.append(contentsOf: enroute)
+        if let runway = approachRunway {
+            let elevation = runway.elevationFt ?? destination.elevationFt
+            let outbound = (runway.headingDeg + 180).truncatingRemainder(dividingBy: 360)
+            func onFinal(_ nm: Double) -> CLLocationCoordinate2D {
+                GreatCircle.destination(from: runway.threshold, courseDeg: outbound, distanceNm: nm)
+            }
+            func glidepath(_ nm: Double) -> Double {
+                ((elevation + nm / descentNmPer1000Ft * 1_000) / 100).rounded() * 100
+            }
+            legs.append(Fix(ident: "CI" + runway.ident, coordinate: onFinal(interceptNm), kind: .approach,
+                            altitudeFt: glidepath(interceptNm)))
+            legs.append(Fix(ident: "FF" + runway.ident, coordinate: onFinal(finalApproachFixNm), kind: .approach,
+                            altitudeFt: glidepath(finalApproachFixNm)))
+            legs.append(Fix(ident: runway.fixIdent, coordinate: runway.threshold, kind: .destination,
+                            altitudeFt: elevation + 50))
+        } else {
+            legs.append(Fix(ident: destination.icao, coordinate: destination.coordinate, kind: .destination,
+                            altitudeFt: destination.elevationFt))
+        }
+        return legs
+    }
+
+    /// Along-track distance of each leg's fix from the start of the path.
+    var legDistancesNm: [Double] {
+        var total = 0.0
+        var result: [Double] = []
+        var previous: CLLocationCoordinate2D?
+        for fix in legs {
+            if let previous { total += GreatCircle.distanceNm(previous, fix.coordinate) }
+            result.append(total)
+            previous = fix.coordinate
+        }
+        // A flown or great-circle path is not made of the legs: scale so
+        // the destination sits at the path's end.
+        if source != .entered, let last = result.last, last > 0 {
+            let scale = totalDistanceNm / last
+            result = result.map { $0 * scale }
+        }
+        return result
+    }
+
+    /// Two plans with the same key fly the same path: a flight pack
+    /// downloaded for one serves the other.
+    var routeKey: String {
+        var parts = [origin.icao, destination.icao]
+        switch source {
+        case .greatCircle: parts.append("GC")
+        case .archive(let day): parts.append("ARCH" + day)
+        case .entered: parts.append(contentsOf: legs.map { "\($0.ident)@\($0.latitude),\($0.longitude)" })
+        }
+        return parts.joined(separator: "|")
     }
 
     var coordinates: [CLLocationCoordinate2D] { route.map(\.coordinate) }
@@ -210,22 +355,29 @@ struct FlightPlan: Codable, Identifiable, Hashable {
         let total = totalDistanceNm
         let climbFt = max(0, cruiseAltitudeFt - origin.elevationFt)
         let descentFt = max(0, cruiseAltitudeFt - destination.elevationFt)
-        let toc = climbFt / 1_000 * Self.climbNmPer1000Ft
+        let start = climbStartNm
+        let toc = start + climbFt / 1_000 * Self.climbNmPer1000Ft
         let tod = total - descentFt / 1_000 * Self.descentNmPer1000Ft
         if toc <= tod { return (toc, tod, cruiseAltitudeFt) }
-        // Lines from both ends: origin + d/climb, destination + (total-d)/descent.
+        // Lines from both ends: origin + (d-start)/climb, destination + (total-d)/descent.
         let c = Self.climbNmPer1000Ft / 1_000, d = Self.descentNmPer1000Ft / 1_000
-        let meet = (total / d + destination.elevationFt - origin.elevationFt) / (1 / c + 1 / d)
-        let level = origin.elevationFt + meet / c
+        let meet = (total / d + start / c + destination.elevationFt - origin.elevationFt) / (1 / c + 1 / d)
+        let level = origin.elevationFt + (meet - start) / c
         return (meet, meet, level)
     }
+
+    /// Where the climb begins: lift-off, at the end of the take-off run
+    /// when the runway is known.
+    private var climbStartNm: Double { departureRunway?.lengthNm ?? 0 }
 
     /// Planned altitude at an along-track distance — the flown track's own
     /// altitude where the path came from the archive, else the climb /
     /// cruise / descent profile.
     func plannedAltitudeFt(atNm along: Double) -> Double {
         let p = verticalProfile
-        if along <= p.toc { return origin.elevationFt + along / Self.climbNmPer1000Ft * 1_000 }
+        if along <= p.toc {
+            return origin.elevationFt + max(0, along - climbStartNm) / Self.climbNmPer1000Ft * 1_000
+        }
         if along >= p.tod {
             return destination.elevationFt + (totalDistanceNm - along) / Self.descentNmPer1000Ft * 1_000
         }

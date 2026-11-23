@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""Build the app's bundled airport and airline tables.
+"""Build the app's bundled airport, runway, navaid and airline tables.
 
-    python3 Tools/BuildAirports/build_airports.py [airports.csv]
+    python3 Tools/BuildAirports/build_airports.py [data-directory]
 
 airports.json  - large and medium airports with an ICAO or IATA code, from
                  OurAirports (public domain): https://ourairports.com/data/
+runways.json   - the runway ends of those airports (OurAirports): ident,
+                 threshold position, elevation, true heading, length
+navaids.json   - VORs, NDBs, DMEs and TACANs worldwide (OurAirports), the
+                 points a flight plan can be built from
 airlines.json  - IATA -> ICAO airline designators of airlines still in
                  business, from Wikidata (CC0): https://www.wikidata.org/
+
+The data directory, when given, holds airports.csv, runways.csv and
+navaids.csv already downloaded; otherwise they are fetched.
 
 Both are written to FlightDeck/Resources/. Only the standard library is used.
 """
 import csv
 import io
 import json
+import math
 import sys
 import urllib.parse
 import urllib.request
@@ -20,7 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "FlightDeck" / "Resources"
-AIRPORTS_URL = "https://davidmegginson.github.io/ourairports-data/airports.csv"
+OURAIRPORTS = "https://davidmegginson.github.io/ourairports-data/"
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 USER_AGENT = "airport-data-build-script/1.0"
 
@@ -31,8 +39,10 @@ def fetch(url: str) -> bytes:
         return response.read()
 
 
-def build_airports(csv_text: str) -> list:
+def build_airports(csv_text: str):
+    """The airport rows, and OurAirports ident -> our code for those kept."""
     rows = []
+    idents = {}
     for row in csv.DictReader(io.StringIO(csv_text)):
         if row["type"] not in ("large_airport", "medium_airport"):
             continue
@@ -65,7 +75,76 @@ def build_airports(csv_text: str) -> list:
         if iata:
             entry["a"] = iata
         rows.append(entry)
+        idents[row["ident"].strip().upper()] = icao
     rows.sort(key=lambda r: r["i"])
+    return rows, idents
+
+
+def number(text):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def course(lat1, lon1, lat2, lon2):
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    y = math.sin(dl) * math.cos(p2)
+    x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def build_runways(csv_text: str, idents: dict) -> dict:
+    """Runway ends per airport: [ident, lat, lon, elevation ft, true
+    heading, length ft, displaced threshold ft]. Ends without a position
+    (helipads, unsurveyed strips) and closed runways are left out."""
+    table = {}
+    for row in csv.DictReader(io.StringIO(csv_text)):
+        code = idents.get(row["airport_ident"].strip().upper())
+        if not code or row.get("closed") == "1":
+            continue
+        length = number(row["length_ft"]) or 0
+        ends = []
+        for this, other in (("le", "he"), ("he", "le")):
+            ident = (row[f"{this}_ident"] or "").strip().upper()
+            lat, lon = number(row[f"{this}_latitude_deg"]), number(row[f"{this}_longitude_deg"])
+            olat, olon = number(row[f"{other}_latitude_deg"]), number(row[f"{other}_longitude_deg"])
+            if not ident or ident.startswith("H") or lat is None or lon is None:
+                continue
+            heading = number(row[f"{this}_heading_degT"])
+            if heading is None and olat is not None and olon is not None:
+                heading = course(lat, lon, olat, olon)
+            if heading is None:
+                continue
+            elevation = number(row[f"{this}_elevation_ft"])
+            ends.append([ident, round(lat, 5), round(lon, 5),
+                         round(elevation) if elevation is not None else None,
+                         round(heading, 1), round(length),
+                         round(number(row[f"{this}_displaced_threshold_ft"]) or 0)])
+        if ends:
+            table.setdefault(code, []).extend(ends)
+    for ends in table.values():
+        ends.sort(key=lambda e: e[0])
+    return dict(sorted(table.items()))
+
+
+NAVAID_TYPES = {"VOR": "V", "VOR-DME": "VD", "VORTAC": "VT", "TACAN": "T",
+                "NDB": "N", "NDB-DME": "ND", "DME": "D"}
+
+
+def build_navaids(csv_text: str) -> list:
+    """Navaids: [ident, name, type, lat, lon, frequency kHz]."""
+    rows = []
+    for row in csv.DictReader(io.StringIO(csv_text)):
+        kind = NAVAID_TYPES.get(row["type"].strip())
+        ident = row["ident"].strip().upper()
+        lat, lon = number(row["latitude_deg"]), number(row["longitude_deg"])
+        if not kind or not ident or lat is None or lon is None:
+            continue
+        rows.append([ident, row["name"].strip(), kind, round(lat, 5), round(lon, 5),
+                     round(number(row["frequency_khz"]) or 0)])
+    rows.sort(key=lambda r: (r[0], r[3]))
     return rows
 
 
@@ -101,14 +180,26 @@ def build_airlines() -> dict:
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    if len(sys.argv) > 1:
-        csv_text = Path(sys.argv[1]).read_text(encoding="utf-8")
-    else:
-        csv_text = fetch(AIRPORTS_URL).decode("utf-8")
-    airports = build_airports(csv_text)
-    (OUT / "airports.json").write_text(json.dumps(airports, ensure_ascii=False, separators=(",", ":")),
-                                       encoding="utf-8")
+    def source(name: str) -> str:
+        if len(sys.argv) > 1:
+            return (Path(sys.argv[1]) / f"{name}.csv").read_text(encoding="utf-8")
+        return fetch(OURAIRPORTS + f"{name}.csv").decode("utf-8")
+
+    def save(name: str, value) -> None:
+        (OUT / name).write_text(json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+                                encoding="utf-8")
+
+    airports, idents = build_airports(source("airports"))
+    save("airports.json", airports)
     print(f"airports.json: {len(airports)} airports")
+
+    runways = build_runways(source("runways"), idents)
+    save("runways.json", runways)
+    print(f"runways.json: {sum(len(e) for e in runways.values())} runway ends at {len(runways)} airports")
+
+    navaids = build_navaids(source("navaids"))
+    save("navaids.json", navaids)
+    print(f"navaids.json: {len(navaids)} navaids")
 
     airlines = build_airlines()
     (OUT / "airlines.json").write_text(json.dumps(airlines, separators=(",", ":")), encoding="utf-8")

@@ -122,9 +122,10 @@ RANGE in the scratchpad.
 | Page | A320 key | 737 key | |
 |---|---|---|---|
 | Menu | MCDU MENU | MENU | CAR / BIKE / PLANE, prompts to every page |
-| Route / flight setup | INIT | RTE | Plane: FLT NBR, FROM/TO, DATE, CRZ FL, DOWNLOAD*, ACTIVATE*. Car/bike: DEST, MAP> |
+| Route / flight setup | INIT | RTE | Plane: FLT NBR, FROM/TO (ICAO), DATE, CRZ FL, DOWNLOAD*, ACTIVATE*. Car/bike: DEST, MAP> |
 | Destination search | DIR | FIX | Apple Maps search results; pick one, then FLY* |
-| Flight plan | F-PLN | LEGS | Waypoints with distance, planned altitude and ETA |
+| Flight plan | F-PLN | LEGS | Plane, on the ground: enter waypoints, constraints and planned altitudes. In flight: distances and ETAs |
+| Departures / arrivals | F-PLN origin / destination line | DEP ARR | Runways, runway-heading departure, straight-in approaches |
 | Progress | PROG | PROG | GS, altitude, height above ground, distances, ETE/ETA, position |
 | Settings | PERF | INIT REF | Units, flight deck, roll source, speed limit, attitude zero |
 | Stored flights | DATA | via INIT REF | Downloaded flight packs: activate, resume, delete |
@@ -143,13 +144,35 @@ For passengers: on the MCDU's MENU page choose **PLANE**, then open the INIT (A3
    (see below). That gives the departure and arrival airports and the path
    the flight actually took on an earlier day. When no track is found, or
    without internet, choose the two airports from the built-in list
-   (OurAirports, public domain, about 3,300 airports): the route is then a
-   great circle.
-2. **Download for offline.** DOWNLOAD* stores a *flight pack*: the plan and the
+   (OurAirports, public domain, about 3,300 airports), by ICAO code
+   (`LGZA/EDDM`; IATA codes work too): the route is then a great circle.
+2. **Or build the flight plan yourself**, as on the real units. On F-PLN (A320) /
+   RTE LEGS (737):
+   - Type a waypoint into the scratchpad and press the line-select key of the
+     fix it should come before; on the DEST line it goes in last. A waypoint
+     is a navaid ident (`KRK`; of several with that ident the nearest is
+     taken), an ICAO airport code, or a position (`3745N/02055E`, or Boeing
+     style `N3745E02055`). CLR (A320) / DEL (737) and the line-select key
+     delete one.
+   - The origin's line-select key (737: DEP ARR, <DEP) opens the
+     **departures**: pick the take-off runway. The plan then climbs on runway
+     heading to 1500 ft above the field, shown as `(2900)`-style altitude
+     leg.
+   - The destination's line-select key (737: DEP ARR, ARR>) opens the
+     **arrivals**: pick a runway for a straight-in 3° approach with an
+     intercept point 12 NM out (`CI26R`) and a final approach fix at 5 NM
+     (`FF26R`), both with their glidepath altitudes as constraints.
+   - Runways (OurAirports, public domain, with real thresholds and headings)
+     and navaids (OurAirports) are bundled. Published SIDs, STARs,
+     approaches and named airway points have no free source, so the pages
+     say NO SID / NO STAR IN DATA BASE and positions stand in for named
+     points.
+   An edited plan needs DOWNLOAD* again: the terrain follows the route.
+3. **Download for offline.** DOWNLOAD* stores a *flight pack*: the plan and the
    terrain along the route (AWS Open Data terrain tiles, about ±80 NM either
    side, finer around both airports). Packs live in Application Support,
    excluded from backups, and are deleted a week after the flight.
-3. **In flight**, in airplane mode with GPS on, nothing needs the network:
+4. **In flight**, in airplane mode with GPS on, nothing needs the network:
    - **ND:** the route from the aircraft to T/C, T/D and the destination,
      airports around, and terrain coloured by height (EGPWS-style near the
      ground, peaks mode at cruise).
@@ -259,6 +282,7 @@ FlightDeck/
 │   ├── FlightLookup.swift       Flight number → airports and path (archive client)
 │   ├── FlightPackStore.swift    Offline flight packs
 │   ├── Airports.swift           Bundled airport and airline tables
+│   ├── NavDatabase.swift        Bundled runways and navaids, waypoint entry parsing
 │   ├── AircraftProfile.swift    Per-aircraft envelope and tape scales (A320, B737)
 │   ├── DisplayStyle.swift       Which flight deck the displays imitate
 │   └── Guidance.swift           Course and path deviation from the flight plan
@@ -267,6 +291,7 @@ FlightDeck/
 │   │   ├── MCDUStyle.swift      Airbus MCDU / Boeing CDU look, keys, screen types
 │   │   ├── MCDUController.swift Keys, scratchpad, actions
 │   │   ├── MCDUPages.swift      The pages and their line-select keys
+│   │   ├── MCDUFlightPlanPages.swift  F-PLN editing, departures, arrivals
 │   │   └── MCDUView.swift       The unit on screen
 │   ├── DestinationPickerView.swift  Map picker (MCDU MAP> prompt)
 │   └── SafetyNoticeView.swift   One-time safety notice
@@ -287,7 +312,7 @@ FlightDeck/
 ├── Resources/                   airports.json, airlines.json (built by Tools/BuildAirports)
 Tools/
 ├── RenderAppIcon/main.swift     Renders the app icon from the PFD geometry
-├── BuildAirports/               Builds the bundled airport and airline tables
+├── BuildAirports/               Builds the bundled airport, runway, navaid and airline tables
 └── FlightArchive/               Daily job that builds the free flight-track archive
 ```
 
@@ -295,7 +320,7 @@ Tools/
 
 - Road speed limits © OpenStreetMap contributors (ODbL).
 - Flight tracks contain data from adsb.lol (ODbL 1.0).
-- Airports: OurAirports (public domain). Airline codes: Wikidata (CC0).
+- Airports, runways and navaids: OurAirports (public domain). Airline codes: Wikidata (CC0).
 - Terrain: AWS Open Data Terrain Tiles (Mapzen / Tilezen). Sources, as
   required by its attribution notice: ArcticDEM (DigitalGlobe imagery, NSF
   awards 1043681, 1559691, 1542736); Australia © Commonwealth of Australia
