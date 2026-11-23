@@ -71,7 +71,14 @@ struct B737Panel: View, Equatable {
     // MARK: - Parts
 
     private func legend(_ text: String, size: CGFloat = 9) -> FCULegend {
-        FCULegend(text, size: size, color: FCUColors.boeingLegend)
+        FCULegend(text, size: size, color: FCUColors.boeingLegend, face: .boeing)
+    }
+
+    /// A thin white ring printed round a knob.
+    private func printedRing(_ diameter: CGFloat) -> some View {
+        Circle().strokeBorder(FCUColors.boeingLegend.opacity(0.85), lineWidth: 1)
+            .frame(width: diameter, height: diameter)
+            .allowsHitTesting(false)
     }
 
     private func window(_ text: String, cells: Int, width: CGFloat) -> some View {
@@ -90,7 +97,10 @@ struct B737Panel: View, Equatable {
         return PanelBlock(width: Self.widths[0], height: Self.height) {
             legend("COURSE").position(x: 50, y: 14)
             window(text, cells: 3, width: 66).position(x: 50, y: 42)
-            KnurledKnob(diameter: 40, turns: 0, ridges: 28).position(x: 50, y: 112)
+            // The arc printed round the knob's left.
+            Circle().trim(from: 0.56, to: 0.94).stroke(FCUColors.boeingLegend.opacity(0.85), lineWidth: 1)
+                .frame(width: 52, height: 52).rotationEffect(.degrees(-90)).position(x: 50, y: 112)
+            BoeingKnob(kind: .course, diameter: 40).position(x: 50, y: 112)
         }
     }
 
@@ -130,13 +140,14 @@ struct B737Panel: View, Equatable {
             legend("IAS/MACH").position(x: 68, y: 14)
             window(text, cells: 4, width: 90).position(x: 68, y: 42)
             legend("C/O", size: 7.5).position(x: 21, y: 124)
-            BoeingPushbutton(legend: "", lit: nil, width: 26, height: 20, action: nil).position(x: 21, y: 145)
+            FCURoundButton(diameter: 24, boeing: true, action: nil).position(x: 21, y: 145)
+            printedRing(56).position(x: 68, y: 112)
             FCUTurnable(onTurn: c.turnSelectingSpeed) { t in
-                KnurledKnob(diameter: 46, turns: t, ridges: 32)
+                BoeingKnob(kind: .speed, diameter: 46, turns: t)
             }
             .position(x: 68, y: 112)
             legend("SPD\nINTV", size: 7).position(x: 115, y: 120)
-            BoeingPushbutton(legend: "", lit: nil, width: 26, height: 20, action: c.toggleSpeedIntervention)
+            FCURoundButton(diameter: 24, boeing: true, action: c.toggleSpeedIntervention)
                 .position(x: 115, y: 145)
         }
     }
@@ -169,10 +180,10 @@ struct B737Panel: View, Equatable {
                         .offset(y: -40.5)
                         .rotationEffect(.degrees(angles[i]))
                 }
-                // The bank-angle selector ring, its index at the limit.
-                SelectorRing(outer: 76, band: 14, tabAngle: angles[3], tabLength: nil)
+                // The bank-angle selector, its tab at the limit.
+                BankAngleSelector(diameter: 76, tabAngle: angles[3])
                 FCUTurnable(onTurn: c.turnHeading) { t in
-                    KnurledKnob(diameter: 48, turns: t, ridges: 34)
+                    BoeingKnob(diameter: 46, turns: t)
                 }
             }
             .frame(width: 110, height: 100)
@@ -196,8 +207,9 @@ struct B737Panel: View, Equatable {
         PanelBlock(width: Self.widths[8], height: Self.height) {
             legend("ALTITUDE").position(x: 70, y: 14)
             window(String(Int(readout.selectedAltitudeFt.rounded())), cells: 5, width: 96).position(x: 70, y: 42)
+            printedRing(60).position(x: 48, y: 114)
             FCUTurnable(onTurn: c.turnAltitude) { t in
-                KnurledKnob(diameter: 50, turns: t, ridges: 34)
+                BoeingKnob(diameter: 48, turns: t)
             }
             .position(x: 48, y: 114)
             BoeingPushbutton(legend: "ALT HLD", lit: false, fontSize: 9, action: c.altitudeHold).position(x: 108, y: 140)
@@ -241,44 +253,29 @@ struct B737Panel: View, Equatable {
             legend("MINS", size: 8).position(x: 45, y: 12)
             legend("RADIO", size: 6.5).position(x: 16, y: 30)
             legend("BARO", size: 6.5).position(x: 74, y: 30)
-            ZStack {
-                // The RADIO / BARO selector round the MINS knob.
-                SelectorRing(outer: 42, band: 5, tabAngle: 53, tabLength: 8)
-                PointerSelector(labels: [], angles: [], selected: nil, diameter: 32, labelRadius: 20,
-                                legend: FCUColors.boeingLegend, center: "RST")
-            }
-            .position(x: 45, y: 52)
+            BoeingSelector(diameter: 36, labelRadius: 20, center: "RST").position(x: 45, y: 54)
 
             legend("FPV", size: 7).position(x: 120, y: 28)
-            BoeingPushbutton(legend: "", lit: nil, width: 26, height: 20, action: nil).position(x: 120, y: 48)
+            FCURoundButton(diameter: 22, boeing: true, action: nil).position(x: 120, y: 48)
             legend("MTRS", size: 7).position(x: 168, y: 28)
-            BoeingPushbutton(legend: "", lit: nil, width: 26, height: 20, action: nil).position(x: 168, y: 48)
+            FCURoundButton(diameter: 22, boeing: true, action: nil).position(x: 168, y: 48)
 
             legend("BARO", size: 8).position(x: 245, y: 12)
             legend("IN", size: 6.5).position(x: 218, y: 30)
             legend("HPA", size: 6.5).position(x: 274, y: 30)
             FCUTurnable(onTurn: { _ in }, onPush: c.toggleStandardBaro) { t in
-                ZStack {
-                    // The IN / HPA selector round the BARO knob.
-                    SelectorRing(outer: 44, band: 5, tabAngle: 53, tabLength: 8)
-                    KnurledKnob(diameter: 34, turns: t, ridges: 26)
-                    Text("STD")
-                        .font(.system(size: 6.5, weight: .heavy))
-                        .foregroundStyle(readout.isStandardBaro ? FCUColors.lightGreen : FCUColors.boeingLegend)
-                        .frame(width: 20, height: 20)
-                        .background(Circle().fill(Color(white: 0.12)))
-                }
+                BoeingSelector(diameter: 36, labelRadius: 20, center: "STD", lit: readout.isStandardBaro, turns: t)
             }
-            .position(x: 245, y: 52)
+            .position(x: 245, y: 54)
 
             legend("MODE", size: 7).position(x: 95, y: 66)
-            PointerSelector(labels: ["APP", "VOR", "MAP", "PLN"], angles: fcuArc(4, from: -80, to: 80), selected: 2,
-                            diameter: 30, labelRadius: 25, legend: FCUColors.boeingLegend, labelSize: 6.5, center: "CTR")
+            BoeingSelector(labels: ["APP", "VOR", "MAP", "PLN"], angles: fcuArc(4, from: -80, to: 80),
+                           diameter: 30, labelRadius: 25, center: "CTR")
                 .position(x: 95, y: 104)
             legend("RANGE", size: 7).position(x: 195, y: 66)
-            PointerSelector(labels: ["5", "10", "20", "40", "80", "160", "320", "640"],
-                            angles: fcuArc(8, from: -125, to: 125), selected: nil,
-                            diameter: 30, labelRadius: 25, legend: FCUColors.boeingLegend, labelSize: 6.5, center: "TFC")
+            BoeingSelector(labels: ["5", "10", "20", "40", "80", "160", "320", "640"],
+                           angles: fcuArc(8, from: -125, to: 125),
+                           diameter: 30, labelRadius: 25, center: "TFC")
                 .position(x: 195, y: 104)
 
             ForEach(keys.indices, id: \.self) { i in
@@ -290,7 +287,7 @@ struct B737Panel: View, Equatable {
     private func efisKey(_ key: String) -> some View {
         let isTerrain = key == "TERR"
         let action: (() -> Void)? = isTerrain ? { c.toggleTerrain() } : nil
-        return BoeingPushbutton(legend: key, lit: isTerrain ? af.terrainOnND : nil, width: 36, height: 30,
-                                fontSize: 7.5, action: action)
+        return BoeingPushbutton(legend: key, lit: isTerrain ? af.terrainOnND : nil, width: 34, height: 28,
+                                fontSize: 8, key: true, action: action)
     }
 }

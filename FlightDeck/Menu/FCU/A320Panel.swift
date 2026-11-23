@@ -96,46 +96,53 @@ struct A320Panel: View, Equatable {
 
     // MARK: - EFIS control panel (captain)
 
+    /// Laid out as the real panel: the baro window over the baro knob
+    /// (pull for STD, push for QNH, in its inHg / hPa ring) with FD and LS
+    /// under it; across the top the map options (here TERR ON ND, the one
+    /// that does something), then the ND mode and range selectors over the
+    /// ADF / VOR switches. The ND has its own range keys and shows its own
+    /// map, so the selectors and switches are drawn but inert.
     private var efis: some View {
         PanelBlock(width: Self.efisWidth, height: Self.height) {
-            // Baro reference: the window, the knob (pull for STD, push for
-            // QNH) and its inHg / hPa ring.
-            LCDWindow(width: 90, height: 34) {
-                PanelBlock(width: 90, height: 34) {
-                    LCDLabel(text: "QNH", lit: !readout.isStandardBaro, size: 7).position(x: 13, y: 8)
+            LCDWindow(width: 72, height: 34) {
+                PanelBlock(width: 72, height: 34) {
+                    LCDLabel(text: "QNH", lit: !readout.isStandardBaro, size: 7).position(x: 36, y: 7)
                     let text = readout.isStandardBaro ? "Std" : "1013"
-                    SegmentText(text: text, cells: text.count, height: 20, color: FCUColors.airbusDigits, ghost: Self.ghost)
-                        .position(x: 52, y: 19)
+                    SegmentText(text: text, cells: text.count, height: 17, color: FCUColors.airbusDigits, ghost: Self.ghost)
+                        .position(x: 36, y: 22)
                 }
             }
-            .position(x: 60, y: 32)
-            FCULegend("inHg", size: 7).position(x: 26, y: 68)
-            FCULegend("hPa", size: 7).position(x: 94, y: 68)
+            .position(x: 50, y: 30)
+            printedArc(center: CGPoint(x: 50, y: 106), radius: 33, from: -42, to: 42)
+            FCULegend("in Hg", size: 7.5).position(x: 18, y: 70)
+            FCULegend("hPa", size: 7.5).position(x: 84, y: 70)
             FCUTurnable(onTurn: { _ in }, onPush: { c.setStandardBaro(false) }, onPull: { c.setStandardBaro(true) }) { t in
-                ZStack {
-                    // The inHg / hPa ring, at hPa as the window reads.
-                    SelectorRing(outer: 58, band: 6, tabAngle: 52, tabLength: 10, recessInside: true)
-                    KnurledKnob(diameter: 42, turns: t, ridges: 30)
-                }
+                // The ring's dot at hPa, as the window reads.
+                AirbusKnob(kind: .baro, diameter: 56, turns: t, selectorAngle: 40)
             }
-            .position(x: 60, y: 94)
-            FCULegend("PULL STD", size: 7).position(x: 60, y: 129)
+            .position(x: 50, y: 112)
+            AirbusPushbutton(legend: "FD", lit: af.flightDirector, width: 40, height: 26, action: c.toggleFlightDirector)
+                .position(x: 28, y: 176)
+            AirbusPushbutton(legend: "LS", lit: af.landingSystem, width: 40, height: 26, action: c.toggleLandingSystem)
+                .position(x: 74, y: 176)
+            Rectangle().fill(FCUColors.airbusLegend.opacity(0.9)).frame(width: 1.4, height: 112).position(x: 98, y: 134)
 
-            AirbusPushbutton(legend: "FD", lit: af.flightDirector, width: 46, height: 38, action: c.toggleFlightDirector)
-                .position(x: 150, y: 32)
-            AirbusPushbutton(legend: "LS", lit: af.landingSystem, width: 46, height: 38, action: c.toggleLandingSystem)
-                .position(x: 204, y: 32)
-            AirbusPushbutton(legend: "TERR\nON ND", lit: af.terrainOnND, width: 58, height: 44, action: c.toggleTerrain)
-                .position(x: 177, y: 92)
+            AirbusPushbutton(legend: "TERR ON ND", lit: af.terrainOnND, width: 92, height: 26, fontSize: 9,
+                             action: c.toggleTerrain)
+                .position(x: 172, y: 24)
 
-            // ND mode and range: the ND has its own range keys, so the
-            // range knob carries no pointer; the mode is the ND's arc.
-            PointerSelector(labels: ["LS", "VOR", "NAV", "ARC", "PLAN"], angles: fcuArc(5, from: -110, to: 110),
-                            selected: 3, diameter: 28, labelRadius: 25)
-                .position(x: 60, y: 166)
-            PointerSelector(labels: ["10", "20", "40", "80", "160", "320"], angles: fcuArc(6, from: -120, to: 120),
-                            selected: nil, diameter: 28, labelRadius: 25)
-                .position(x: 177, y: 166)
+            AirbusSelector(labels: ["LS", "VOR", "NAV", "ARC", "PLAN"], angles: fcuArc(5, from: -95, to: 95),
+                           pointer: 47.5, diameter: 36, labelRadius: 28, labelSize: 7.5)
+                .position(x: 134, y: 98)
+            AirbusSelector(labels: ["10", "20", "40", "80", "160", "320"], angles: fcuArc(6, from: -110, to: 110),
+                           pointer: -22, diameter: 36, labelRadius: 28, labelSize: 7.5)
+                .position(x: 204, y: 98)
+            ForEach([134.0, 204.0], id: \.self) { x in
+                FCULegend("ADF", size: 7).position(x: x - 21, y: 166)
+                FCULegend("VOR", size: 7).position(x: x + 22, y: 166)
+                AirbusBallSwitch(diameter: 20).position(x: x, y: 166)
+                FCULegend("OFF", size: 7).position(x: x, y: 184)
+            }
         }
     }
 
@@ -165,8 +172,8 @@ struct A320Panel: View, Equatable {
                 }
             }
             .position(x: 85, y: 44)
-            FCULegend("SPD\nMACH", size: 8).position(x: 36, y: 115)
-            AirbusRoundButton(action: nil).position(x: 36, y: 146)
+            FCURoundButton(diameter: 30, action: nil).position(x: 32, y: 108)
+            FCULegend("SPD\nMACH", size: 8).position(x: 32, y: 140)
             FCUTurnable(onTurn: { steps in
                             let shown = speedPresetShown
                             c.turnAirbusSpeed(steps, presetShown: shown)
@@ -174,9 +181,9 @@ struct A320Panel: View, Equatable {
                         },
                         onPush: { speedPresetUntil = nil; c.manageSpeed() },
                         onPull: { c.pullAirbusSpeed(presetShown: speedPresetShown); speedPresetUntil = nil }) { t in
-                KnurledKnob(diameter: 64, turns: t, index: true)
+                AirbusKnob(kind: .speed, diameter: Self.knob, turns: t)
             }
-            .position(x: 108, y: 140)
+            .position(x: 102, y: Self.knobY)
         }
     }
 
@@ -204,11 +211,13 @@ struct A320Panel: View, Equatable {
                         },
                         onPush: { headingPresetUntil = nil; c.manageHeading() },
                         onPull: { c.pullAirbusHeading(presetShown: headingPresetShown); headingPresetUntil = nil }) { t in
-                KnurledKnob(diameter: 64, turns: t, index: true)
+                AirbusKnob(kind: .heading, diameter: Self.knob, turns: t)
             }
-            .position(x: 77, y: 140)
-            AirbusPushbutton(legend: "LOC", lit: af.localizerArmed, action: c.toggleLocalizer)
-                .position(x: 158, y: 154)
+            .position(x: 77, y: Self.knobY)
+            // LOC sits under the HDG knob, as on the real unit.
+            AirbusPushbutton(legend: "LOC", lit: af.localizerArmed, width: Self.smallButton.width,
+                             height: Self.smallButton.height, action: c.toggleLocalizer)
+                .position(x: 77, y: Self.buttonY)
         }
     }
 
@@ -216,18 +225,21 @@ struct A320Panel: View, Equatable {
 
     private var center: some View {
         PanelBlock(width: Self.centerWidth, height: Self.height) {
+            // The white lines printed either side of the column.
+            Rectangle().fill(FCUColors.airbusLegend.opacity(0.9)).frame(width: 1.4, height: 150).position(x: 4, y: 116)
+            Rectangle().fill(FCUColors.airbusLegend.opacity(0.9)).frame(width: 1.4, height: 150).position(x: 146, y: 116)
             // The HDG-V/S / TRK-FPA switch: the panel's reference stays
             // HDG and V/S, so it is drawn but inert.
-            FCULegend("HDG\nV/S", size: 8).position(x: 38, y: 40)
-            AirbusRoundButton(action: nil).position(x: 75, y: 40)
-            FCULegend("TRK\nFPA", size: 8).position(x: 112, y: 40)
+            FCULegend("HDG\nTRK", size: 8).position(x: 37, y: 50)
+            FCURoundButton(diameter: 32, action: nil).position(x: 75, y: 50)
+            FCULegend("V/S\nFPA", size: 8).position(x: 113, y: 50)
 
-            AirbusPushbutton(legend: "AP1", lit: af.autopilot1, width: 50, action: c.toggleAutopilot1)
-                .position(x: 42, y: 104)
-            AirbusPushbutton(legend: "AP2", lit: af.autopilot2, width: 50, action: c.toggleAutopilot2)
-                .position(x: 108, y: 104)
-            AirbusPushbutton(legend: "A/THR", lit: af.autothrust, width: 50, action: c.toggleAutothrust)
-                .position(x: 75, y: 160)
+            AirbusPushbutton(legend: "AP1", lit: af.autopilot1, action: c.toggleAutopilot1)
+                .position(x: 47, y: 108)
+            AirbusPushbutton(legend: "AP2", lit: af.autopilot2, action: c.toggleAutopilot2)
+                .position(x: 103, y: 108)
+            AirbusPushbutton(legend: "A/THR", lit: af.autothrust, action: c.toggleAutothrust)
+                .position(x: 75, y: 166)
         }
     }
 
@@ -260,50 +272,118 @@ struct A320Panel: View, Equatable {
             }
             .position(x: 215, y: 44)
 
-            altitudeKnob(step100: step100).position(x: 150, y: 142)
+            altitudeKnob(step100: step100).position(x: 150, y: Self.knobY)
+            // EXPED under the ALT knob; no expedite mode here, so inert.
+            AirbusPushbutton(legend: "EXPED", width: Self.smallButton.width, height: Self.smallButton.height, action: nil)
+                .position(x: 150, y: Self.buttonY)
 
-            // METRIC ALT and EXPED: no metric display and no expedite mode
-            // here, so they are on the panel but inert.
-            AirbusPushbutton(legend: "METRIC\nALT", width: 46, height: 38, action: nil)
-                .position(x: 244, y: 112)
-            AirbusPushbutton(legend: "EXPED", width: 46, height: 38, action: nil)
-                .position(x: 244, y: 166)
+            // METRIC ALT: a round button between the ALT and V/S knobs. No
+            // metric display here, so inert.
+            FCURoundButton(diameter: 32, action: nil).position(x: 240, y: 104)
+            FCULegend("METRIC\nALT", size: 8).position(x: 240, y: 137)
 
+            // UP / DN round the V/S knob's left side, PUSH TO LEVEL OFF on
+            // its right.
+            verticalSpeedArrows(center: CGPoint(x: 330, y: Self.knobY))
+            FCULegend("UP", size: 8).position(x: 324, y: 80)
+            FCULegend("DN", size: 8).position(x: 299, y: 167)
+            FCULegend("PUSH\nTO\nLEVEL\nOFF", size: 7.5).position(x: 392, y: Self.knobY)
             FCUTurnable(onTurn: c.turnVerticalSpeed, onPush: c.levelOff, onPull: c.engageVerticalSpeed) { t in
-                KnurledKnob(diameter: 62, turns: t, index: true)
+                AirbusKnob(kind: .verticalSpeed, diameter: Self.knob, turns: t)
             }
-            .position(x: 330, y: 142)
-            AirbusPushbutton(legend: "APPR", lit: af.approachArmed, action: c.toggleApproach)
-                .position(x: 398, y: 158)
+            .position(x: 330, y: Self.knobY)
+            AirbusPushbutton(legend: "APPR", lit: af.approachArmed, width: Self.smallButton.width,
+                             height: Self.smallButton.height, action: c.toggleApproach)
+                .position(x: 330, y: Self.buttonY)
         }
     }
 
-    /// The ALT knob inside its 100 / 1000 selector ring: tap a figure to
-    /// move the ring's tab to it.
+    /// The ALT knob in its black 100 / 1000 selector ring, the figures and
+    /// their ticks printed above: tap a figure to turn the ring's dot to it.
     private func altitudeKnob(step100: Bool) -> some View {
-        let tabAngle = step100 ? -56.0 : 56.0
+        let dotAngle = step100 ? -38.0 : 38.0
         return ZStack {
-            SelectorRing(outer: 90, band: 9, tabAngle: tabAngle, tabLength: 13, recessInside: true)
-                .animation(.easeOut(duration: 0.15), value: step100)
-            FCUTurnable(onTurn: c.turnAltitude, onPush: c.leaveVerticalSpeed, onPull: c.leaveVerticalSpeed) { t in
-                KnurledKnob(diameter: 62, turns: t, index: true)
+            ForEach([-38.0, 38.0], id: \.self) { a in
+                Capsule().fill(FCUColors.airbusLegend.opacity(0.95))
+                    .frame(width: 1.3, height: 5)
+                    .offset(y: -Self.knob / 2 - 4)
+                    .rotationEffect(.degrees(a))
             }
-            stepButton("100", feet: 100, angle: -50)
-            stepButton("1000", feet: 1_000, angle: 50)
+            FCUTurnable(onTurn: c.turnAltitude, onPush: c.leaveVerticalSpeed, onPull: c.leaveVerticalSpeed) { t in
+                AirbusKnob(kind: .altitude, diameter: Self.knob, turns: t, selectorAngle: dotAngle)
+                    .animation(.easeOut(duration: 0.15), value: step100)
+            }
+            stepButton("100", feet: 100, angle: -36)
+            stepButton("1000", feet: 1_000, angle: 36)
         }
-        .frame(width: 140, height: 120)
+        .frame(width: 120, height: 110)
     }
 
     private func stepButton(_ label: String, feet: Double, angle: Double) -> some View {
-        let a = angle * .pi / 180, r: CGFloat = 70
+        let a = angle * .pi / 180, r: CGFloat = 46
         return Button { c.setAltitudeStep(feet) } label: {
-            FCULegend(label, size: 9)
-                .frame(width: 34, height: 22)
+            FCULegend(label, size: 8.5)
+                .frame(width: 34, height: 18)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .offset(x: CGFloat(sin(a)) * r, y: -CGFloat(cos(a)) * r)
     }
+
+    /// The curved arrows printed round the V/S knob's left: up to UP at
+    /// the top, down to DN at the bottom.
+    private func verticalSpeedArrows(center: CGPoint) -> some View {
+        Canvas { ctx, _ in
+            let r = Self.knob / 2 + 7
+            for (from, to) in [(-95.0, -28.0), (-112.0, -150.0)] {
+                var arc = Path()
+                let n = 20
+                var last = CGPoint.zero, prev = CGPoint.zero
+                for i in 0...n {
+                    let a = (from + (to - from) * Double(i) / Double(n)) * .pi / 180
+                    let pt = CGPoint(x: center.x + r * CGFloat(sin(a)), y: center.y - r * CGFloat(cos(a)))
+                    if i == 0 { arc.move(to: pt) } else { arc.addLine(to: pt) }
+                    prev = last; last = pt
+                }
+                ctx.stroke(arc, with: .color(FCUColors.airbusLegend.opacity(0.95)), lineWidth: 1.3)
+                // The arrowhead along the arc's last direction.
+                let dx = last.x - prev.x, dy = last.y - prev.y
+                let len = max(0.01, (dx * dx + dy * dy).squareRoot())
+                let ux = dx / len, uy = dy / len
+                let head = Path { p in
+                    p.move(to: CGPoint(x: last.x + ux * 4, y: last.y + uy * 4))
+                    p.addLine(to: CGPoint(x: last.x - uy * 2.6, y: last.y + ux * 2.6))
+                    p.addLine(to: CGPoint(x: last.x + uy * 2.6, y: last.y - ux * 2.6))
+                    p.closeSubpath()
+                }
+                ctx.fill(head, with: .color(FCUColors.airbusLegend.opacity(0.95)))
+            }
+        }
+        .frame(width: Self.verticalWidth, height: Self.height)
+        .position(x: Self.verticalWidth / 2, y: Self.height / 2)
+        .allowsHitTesting(false)
+    }
+
+    /// A thin printed arc (the baro knob's inHg — hPa), degrees clockwise
+    /// from the top.
+    private func printedArc(center: CGPoint, radius: CGFloat, from: Double, to: Double) -> some View {
+        Path { p in
+            let n = 24
+            for i in 0...n {
+                let a = (from + (to - from) * Double(i) / Double(n)) * .pi / 180
+                let pt = CGPoint(x: center.x + radius * CGFloat(sin(a)), y: center.y - radius * CGFloat(cos(a)))
+                if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+            }
+        }
+        .stroke(FCUColors.airbusLegend.opacity(0.95), lineWidth: 1.1)
+    }
+
+    /// Knob and pushbutton sizes and rows, as on the real unit: the knobs'
+    /// bezels all one size, the small pushbuttons under them.
+    private static let knob: CGFloat = 64
+    private static let knobY: CGFloat = 122
+    private static let buttonY: CGFloat = 180
+    private static let smallButton = CGSize(width: 42, height: 26)
 
     /// How strongly the unlit segments show through the LCD glass.
     private static let ghost = 0.08
