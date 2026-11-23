@@ -7,7 +7,8 @@ import CoreLocation
 /// sold by paid services; a SimBrief plan is the free stand-in, built from
 /// real-world route data.
 ///
-/// `https://www.simbrief.com/api/xml.fetcher.php?username=<user>&json=1`
+/// `https://www.simbrief.com/api/xml.fetcher.php?username=<user>&json=1`, or
+/// `?userid=<Pilot ID>` when the entry is all digits.
 struct SimBriefPlan {
     struct Fix {
         let ident: String
@@ -44,7 +45,9 @@ struct SimBriefPlan {
 
     static func fetch(username: String) async throws -> SimBriefPlan {
         var components = URLComponents(string: "https://www.simbrief.com/api/xml.fetcher.php")!
-        components.queryItems = [URLQueryItem(name: "username", value: username),
+        // All digits is the numeric SimBrief Pilot ID, else the username.
+        let isPilotID = !username.isEmpty && username.allSatisfy(\.isNumber)
+        components.queryItems = [URLQueryItem(name: isPilotID ? "userid" : "username", value: username),
                                  URLQueryItem(name: "json", value: "1")]
         var request = URLRequest(url: components.url!)
         request.timeoutInterval = 20
