@@ -187,10 +187,23 @@ struct BoeingNDView: View {
                             fill: Boeing.background, stroke: Boeing.white, lineWidth: B737ND.line)
         }
 
-        // MCP heading bug on the ring: the guidance course while a route is
-        // active.
-        if let course = Guidance(flightData: flightData, routePlanner: routePlanner).bearing {
+        // MCP heading bug on the ring: always shown, at the MCP heading —
+        // the route course until a heading has been set. While HDG SEL is
+        // engaged the selected heading line runs dashed from the aircraft
+        // to the bug.
+        let autoFlight = flightData.autoFlight
+        if let course = autoFlight.headingTargetDeg
+            ?? Guidance(flightData: flightData, routePlanner: routePlanner).bearing {
             let diff = angularDifference(course, upDeg)
+            if autoFlight.isHeadingSelected {
+                var line = context
+                line.clip(to: ringClip)
+                var p = Path()
+                p.move(to: B737ND.planeApex)
+                p.addLine(to: polarPoint(B737ND.planeApex, diff, 2 * r))
+                line.stroke(p, with: .color(Boeing.magenta),
+                            style: StrokeStyle(lineWidth: B737ND.thinLine, dash: B737ND.headingLineDash))
+            }
             if abs(diff) <= B737ND.tickSpanDeg {
                 var bug = context
                 bug.translateBy(x: c.x, y: c.y)
@@ -334,22 +347,13 @@ struct BoeingNDView: View {
         let g = NDGeometry(apex: B737ND.center, radius: B737ND.ringRadius,
                            rangeNm: rangeNm, origin: location.coordinate, headingDeg: upDeg)
 
-        // In flight: the airports around (the terrain is drawn first, under
-        // everything; see drawTerrain).
-        if isFlying {
-            let planned = Set(routePlanner.flightPlan.map { [$0.origin.icao, $0.destination.icao] } ?? [])
-            for airport in g.airportsInView(excluding: planned) {
-                drawAirportSymbol(ctx, at: g.project(airport.coordinate), ident: airport.icao)
-            }
-        }
 
+        // The active route: one solid magenta line.
         let coordinates = routePlanner.remainingRouteCoordinates(maximumCount: 400)
-        if coordinates.count > 1 {
+        let routePoints = coordinates.map(g.project)
+        if routePoints.count > 1 {
             var path = Path()
-            for (index, coordinate) in coordinates.enumerated() {
-                let p = g.project(coordinate)
-                index == 0 ? path.move(to: p) : path.addLine(to: p)
-            }
+            path.addLines(routePoints)
             ctx.stroke(path, with: .color(Boeing.magenta), lineWidth: B737ND.routeLine)
         }
 
@@ -360,31 +364,125 @@ struct BoeingNDView: View {
             ctx.stroke(leg, with: .color(Boeing.magenta), lineWidth: B737ND.routeLine)
         }
 
+        // Other airports (the ARPT map switch): cyan circles, the idents
+        // kept off the route line.
+        if isFlying {
+            let planned = Set(routePlanner.flightPlan.map { [$0.origin.icao, $0.destination.icao] } ?? [])
+            for airport in g.airportsInView(excluding: planned) {
+                drawAirportSymbol(ctx, at: g.project(airport.coordinate), ident: airport.icao,
+                                  color: Boeing.cyan, avoiding: routePoints)
+            }
+        }
+
+        drawPlanRunwaysAndAirports(ctx, g, routePoints: routePoints)
+
         // Waypoints from the active one onward: the active one magenta, the
-        // rest white, each with its ident.
-        for (index, waypoint) in routePlanner.waypoints.enumerated()
-        where index >= routePlanner.activeWaypointIndex {
-            drawWaypointSymbol(ctx, at: g.project(waypoint.coordinate), ident: waypoint.ident,
-                               color: index == routePlanner.activeWaypointIndex ? Boeing.magenta : Boeing.white)
+        // rest white, each with its ident and, under it, its altitude
+        // constraint. The VNAV points are green circles with their label.
+        for point in routePlanner.ndPlanPoints {
+            let at = g.project(point.coordinate)
+            switch point.kind {
+            case .fix:
+                drawWaypointSymbol(ctx, at: at, ident: point.ident, constraintFt: point.constraintFt,
+                                   color: point.isActive ? Boeing.magenta : Boeing.white)
+            case .topOfClimb, .topOfDescent, .decel:
+                drawProfilePoint(ctx, at: at, label: point.ident)
+            case .runway:
+                if !showsRunwaysToScale {
+                    drawWaypointSymbol(ctx, at: at, ident: point.ident, constraintFt: nil,
+                                       color: point.isActive ? Boeing.magenta : Boeing.white)
+                }
+            case .airport:
+                break // drawn with the plan's airports
+            }
         }
     }
 
-    /// An airport: a cyan circle with its ident beside it.
-    private func drawAirportSymbol(_ context: GraphicsContext, at p: CGPoint, ident: String) {
-        let r = B737ND.starRadius * 0.7
-        context.stroke(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r)),
-                       with: .color(Boeing.cyan), lineWidth: B737ND.line * 0.8)
-        context.boeingText(ident, at: CGPoint(x: p.x + 1.6 * r, y: p.y + 1.4 * r),
-                           size: B737ND.fontSmall, Boeing.cyan, anchor: .leading)
+    // MARK: Flight-plan airports and runways
+
+    /// Selected runways are drawn to scale at the short map ranges.
+    private var showsRunwaysToScale: Bool { rangeNm <= B737ND.runwayMaxRangeNm }
+
+    /// Origin and destination: the selected runway as a white outline to
+    /// scale with dashed extended centreline and its ident at the short
+    /// ranges; otherwise, and with no runway selected, a white airport
+    /// circle with the ICAO code.
+    private func drawPlanRunwaysAndAirports(_ context: GraphicsContext, _ g: NDGeometry,
+                                            routePoints: [CGPoint]) {
+        guard let plan = routePlanner.flightPlan else { return }
+        let runways: [(Runway, Airport)] = [(plan.departureRunway, plan.origin), (plan.approachRunway, plan.destination)]
+            .compactMap { runway, airport in runway.map { ($0, airport) } }
+        var airports = routePlanner.ndPlanAirports
+        if showsRunwaysToScale {
+            for (runway, _) in runways where g.isInView(runway.coordinate, margin: 1.5) {
+                let shape = g.runwayShape(runway, minimumWidth: B737ND.runwayMinWidth,
+                                          centrelineNm: B737ND.runwayCentrelineNm)
+                context.stroke(shape.centrelinePath, with: .color(Boeing.white),
+                               style: StrokeStyle(lineWidth: B737ND.thinLine, dash: B737ND.runwayCentrelineDash))
+                context.polygon(shape.outline, fill: Boeing.background, stroke: Boeing.white,
+                                lineWidth: B737ND.thinLine)
+                context.boeingText(runway.fixIdent, at: shape.labelAnchor(offset: B737ND.runwayMinWidth + 8),
+                                   size: B737ND.fontSmall, Boeing.white, anchor: .leading)
+            }
+        } else {
+            airports += runways.map(\.1)
+        }
+        for airport in airports where g.isInView(airport.coordinate) {
+            drawAirportSymbol(context, at: g.project(airport.coordinate), ident: airport.icao,
+                              color: Boeing.white, avoiding: routePoints)
+        }
     }
 
-    /// The four-point waypoint star: points on the axes, waists between.
-    private func drawWaypointSymbol(_ context: GraphicsContext, at p: CGPoint, ident: String, color: Color) {
+    /// An airport: a circle with its ident below right, moved to another
+    /// side when that would put it across the route.
+    private func drawAirportSymbol(_ context: GraphicsContext, at p: CGPoint, ident: String,
+                                   color: Color, avoiding route: [CGPoint]) {
+        let r = B737ND.airportRadius
+        context.stroke(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r)),
+                       with: .color(color), lineWidth: B737ND.line * 0.8)
+        let width = context.boeingTextWidth(ident, size: B737ND.fontSmall), height = B737ND.fontSmall
+        let dx = 1.6 * r, dy = 1.4 * r
+        let candidates = [
+            CGRect(x: p.x + dx, y: p.y + dy - height / 2, width: width, height: height),
+            CGRect(x: p.x + dx, y: p.y - dy - height / 2, width: width, height: height),
+            CGRect(x: p.x - dx - width, y: p.y + dy - height / 2, width: width, height: height),
+            CGRect(x: p.x - dx - width, y: p.y - dy - height / 2, width: width, height: height),
+        ]
+        let label = NDLabels.place(candidates, avoiding: route)
+        context.boeingText(ident, at: CGPoint(x: label.minX, y: label.midY), size: B737ND.fontSmall,
+                           color, anchor: .leading)
+    }
+
+    /// The four-point waypoint star, drawn in outline: points on the axes,
+    /// waists between. The ident sits below right in the star's colour, the
+    /// altitude constraint on the line under it.
+    private func drawWaypointSymbol(_ context: GraphicsContext, at p: CGPoint, ident: String,
+                                    constraintFt: Double?, color: Color) {
         let outer = B737ND.starRadius, inner = B737ND.starRadius * 0.3
         let star = (0..<8).map { i in polarPoint(p, Double(i) * 45, i % 2 == 0 ? outer : inner) }
-        context.polygon(star, fill: color)
-        context.boeingText(ident, at: CGPoint(x: p.x + 1.3 * outer, y: p.y + 1.2 * outer),
-                           size: B737ND.fontSmall, anchor: .leading)
+        context.polygon(star, fill: Boeing.background, stroke: color, lineWidth: B737ND.line * 0.75)
+        let identAt = CGPoint(x: p.x + 1.3 * outer, y: p.y + 1.2 * outer)
+        context.boeingText(ident, at: identAt, size: B737ND.fontSmall, color, anchor: .leading)
+        if let constraintFt {
+            context.boeingText(constraintText(constraintFt),
+                               at: CGPoint(x: identAt.x, y: identAt.y + B737ND.fontSmall),
+                               size: B737ND.fontSmall, color, anchor: .leading)
+        }
+    }
+
+    /// "FL120" from the flight levels up (as the MCDU writes them), else
+    /// feet: "5000".
+    private func constraintText(_ feet: Double) -> String {
+        feet >= 10_000 ? "FL\(Int((feet / 100).rounded()))" : "\(Int((feet / 10).rounded()) * 10)"
+    }
+
+    /// T/C, T/D and DECEL: a small green circle on the path, labelled.
+    private func drawProfilePoint(_ context: GraphicsContext, at p: CGPoint, label: String) {
+        let r = B737ND.profilePointRadius
+        context.stroke(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r)),
+                       with: .color(Boeing.green), lineWidth: B737ND.line * 0.8)
+        context.boeingText(label, at: CGPoint(x: p.x + 1.8 * r, y: p.y + 1.6 * r),
+                           size: B737ND.fontSmall, Boeing.green, anchor: .leading)
     }
 
     // MARK: Aircraft symbol
@@ -439,7 +537,7 @@ struct BoeingNDView: View {
     /// Active waypoint block, top right: ident, ETA and distance to go, all
     /// right-aligned on the display edge; the distance leaves room for "NM".
     private func drawToWaypoint(_ context: GraphicsContext) {
-        guard let waypoint = routePlanner.activeWaypoint else { return }
+        guard let waypoint = routePlanner.toWaypoint else { return }
         let right = B737ND.canvas - B737ND.blockMargin
         context.boeingText(waypoint.ident, at: CGPoint(x: right, y: B737ND.row(0)), size: B737ND.fontValue,
                            Boeing.magenta, anchor: .trailing)
@@ -553,12 +651,22 @@ enum B737ND {
     static let bugHeight: CGFloat = 24
     static let bugNotchHalfWidth: CGFloat = 14
     static let bugNotchDepth: CGFloat = 16
+    static let headingLineDash: [CGFloat] = [20, 14]
     static let headingLabelGap: CGFloat = 12
     static let rangeLabelInset: CGFloat = 16
     static let trackTickHalfWidth: CGFloat = 12
     static let planeHalfWidth: CGFloat = 32
     static let planeLength: CGFloat = 66
     static let starRadius: CGFloat = 20
+    static var airportRadius: CGFloat { starRadius * 0.7 }
+    static var profilePointRadius: CGFloat { starRadius * 0.6 }
+
+    /// Selected runways are drawn to scale up to this range, with the
+    /// extended centreline the 737 shows from the threshold.
+    static let runwayMaxRangeNm = 40.0
+    static let runwayMinWidth: CGFloat = 10
+    static let runwayCentrelineNm = 14.2
+    static let runwayCentrelineDash: [CGFloat] = [16, 12]
     static let windArrowHalfLength: CGFloat = 36
 
     // MARK: Type

@@ -111,6 +111,7 @@ struct NDView: View {
             drawRangeArcs(sector, bounds)
             drawMap(sector, bounds)
             drawTrackIndication(sector)
+            drawSelectedHeading(sector, bounds)
             drawAirplane(sector)
             drawTerrainReadout(sector, bounds)
 
@@ -232,6 +233,44 @@ struct NDView: View {
         }
     }
 
+    // MARK: Selected heading
+
+    /// The FCU's selected heading: a cyan triangle standing on the ring
+    /// among the graduations, its point on the heading — shown only while a
+    /// heading is selected (HDG); managed NAV shows none. When the heading
+    /// lies beyond the visible part of the arc, its value is written in cyan
+    /// at the end of the arc on that side instead.
+    private func drawSelectedHeading(_ context: GraphicsContext, _ bounds: CGRect) {
+        guard let selected = flightData.autoFlight.selectedHeadingDeg else { return }
+        let diff = angularDifference(selected, flightData.headingDeg)
+
+        // The arc's visible end: where the ring leaves the display sides.
+        let halfWidth = bounds.width / 2 - ND.selectedHeadingEdgeMargin
+        let visibleDeg = min(ND.tickSpanDeg,
+                             asin(Double(min(1, max(0, halfWidth / ND.ringRadius)))) * 180 / .pi)
+
+        if abs(diff) <= visibleDeg {
+            var bug = context
+            bug.translateBy(x: ND.center.x, y: ND.center.y)
+            bug.rotate(by: .degrees(diff))
+            let r = ND.ringRadius, h = ND.selectedHeadingHeight, w = ND.selectedHeadingHalfWidth
+            var triangle = Path()
+            triangle.move(to: CGPoint(x: 0, y: -r))
+            triangle.addLine(to: CGPoint(x: -w, y: -r - h))
+            triangle.addLine(to: CGPoint(x: w, y: -r - h))
+            triangle.closeSubpath()
+            bug.fill(triangle, with: .color(EFIS.background))
+            bug.stroke(triangle, with: .color(EFIS.cyan),
+                       style: StrokeStyle(lineWidth: ND.lineWidth * 1.3, lineJoin: .round))
+        } else {
+            let side: Double = diff < 0 ? -1 : 1
+            let at = ND.point(bearingDeg: side * visibleDeg, radius: ND.ringRadius - ND.fontIntermediate)
+            text(context, String(format: "%03d", Int(selected.rounded()) % 360),
+                 x: at.x, y: at.y, size: ND.fontIntermediate, EFIS.cyan,
+                 anchor: side < 0 ? .leading : .trailing)
+        }
+    }
+
     // MARK: Track indication
 
     /// Green track line from the rose centre out to the ring, with a diamond
@@ -311,24 +350,20 @@ struct NDView: View {
                            rangeNm: rangeNm, origin: location.coordinate,
                            headingDeg: flightData.headingDeg)
 
-        // In flight: the airports around (the terrain is drawn first, under
-        // everything; see drawTerrain).
-        if isFlying {
-            let planned = Set(routePlanner.flightPlan.map { [$0.origin.icao, $0.destination.icao] } ?? [])
-            for airport in g.airportsInView(excluding: planned) {
-                drawAirportSymbol(ctx, at: g.project(airport.coordinate), ident: airport.icao)
-            }
-        }
 
         // The not-yet-flown part of the plan; sequenced legs disappear behind.
+        // Airbus draws the whole active flight plan, active leg included, in
+        // green — magenta is kept for constraints and managed targets. Solid
+        // while NAV flies it; dashed while a heading is selected (HDG).
         let coordinates = routePlanner.remainingRouteCoordinates(maximumCount: 400)
-        if coordinates.count > 1 {
+        let routePoints = coordinates.map(g.project)
+        let routeStyle = flightData.autoFlight.isHeadingSelected
+            ? StrokeStyle(lineWidth: ND.routeWidth, dash: ND.routeDash)
+            : StrokeStyle(lineWidth: ND.routeWidth)
+        if routePoints.count > 1 {
             var path = Path()
-            for (index, coordinate) in coordinates.enumerated() {
-                let p = g.project(coordinate)
-                index == 0 ? path.move(to: p) : path.addLine(to: p)
-            }
-            ctx.stroke(path, with: .color(EFIS.green), lineWidth: ND.routeWidth)
+            path.addLines(routePoints)
+            ctx.stroke(path, with: .color(EFIS.green), style: routeStyle)
         }
 
         // With no computed route, the direct-to leg is the active flight plan.
@@ -336,36 +371,121 @@ struct NDView: View {
             var leg = Path()
             leg.move(to: g.apex)
             leg.addLine(to: g.project(waypoint.coordinate))
-            ctx.stroke(leg, with: .color(EFIS.green), lineWidth: ND.routeWidth)
+            ctx.stroke(leg, with: .color(EFIS.green), style: routeStyle)
         }
 
-        // Waypoints from the TO waypoint onward: the active one white, the
-        // rest of the plan green, each with its ident.
-        for (index, waypoint) in routePlanner.waypoints.enumerated()
-        where index >= routePlanner.activeWaypointIndex {
-            drawWaypointSymbol(ctx, at: g.project(waypoint.coordinate),
-                               ident: waypoint.ident,
-                               color: index == routePlanner.activeWaypointIndex
-                                   ? .white : EFIS.green)
+        // Other airports (the ARPT option): magenta stars, the idents kept
+        // off the flight-plan line.
+        if isFlying {
+            let planned = Set(routePlanner.flightPlan.map { [$0.origin.icao, $0.destination.icao] } ?? [])
+            for airport in g.airportsInView(excluding: planned) {
+                drawAirportSymbol(ctx, at: g.project(airport.coordinate), ident: airport.icao,
+                                  color: EFIS.magenta, avoiding: routePoints)
+            }
+        }
+
+        // The flight plan's own airports and runways, in white.
+        drawPlanRunwaysAndAirports(ctx, g, routePoints: routePoints)
+
+        // Waypoints from the TO waypoint onward: the TO waypoint white, the
+        // rest of the plan green, each with its ident. Pseudo waypoints of
+        // the vertical profile have their own symbols and no ident.
+        for point in routePlanner.ndPlanPoints {
+            let at = g.project(point.coordinate)
+            switch point.kind {
+            case .fix:
+                if let constraint = point.constraintFt { drawConstraintCircle(ctx, at: at, constraintFt: constraint) }
+                drawWaypointSymbol(ctx, at: at, ident: point.ident,
+                                   color: point.isActive ? .white : EFIS.green)
+            case .topOfClimb:
+                drawLevelOffSymbol(ctx, at: at, color: EFIS.cyan)
+            case .topOfDescent:
+                drawTopOfDescentSymbol(ctx, at: at, color: .white)
+            case .decel:
+                drawDecelSymbol(ctx, at: at, color: EFIS.magenta)
+            case .runway:
+                // Drawn by the runway symbol at the ranges that show it;
+                // further out the runway fix is a waypoint like the others.
+                if !showsRunwaysToScale {
+                    drawWaypointSymbol(ctx, at: at, ident: point.ident,
+                                       color: point.isActive ? .white : EFIS.green)
+                }
+            case .airport:
+                break // drawn with the plan's airports
+            }
         }
     }
 
-    /// An airport: a magenta star of four short bars, its ident beside it.
-    private func drawAirportSymbol(_ context: GraphicsContext, at: CGPoint, ident: String) {
-        let r: CGFloat = 11
+    // MARK: Flight-plan airports and runways
+
+    /// The real ND draws a selected runway to scale at the short ranges and
+    /// falls back to the airport symbol beyond them.
+    private var showsRunwaysToScale: Bool { rangeNm <= ND.runwayMaxRangeNm }
+
+    /// Origin and destination: the selected runway as a white outline to
+    /// scale, with its ident and a dashed extended centreline, at the short
+    /// ranges; otherwise — and for an airport with no runway selected — a
+    /// white airport star with the ICAO code.
+    private func drawPlanRunwaysAndAirports(_ context: GraphicsContext, _ g: NDGeometry,
+                                            routePoints: [CGPoint]) {
+        guard let plan = routePlanner.flightPlan else { return }
+        let runways: [(Runway, Airport)] = [(plan.departureRunway, plan.origin), (plan.approachRunway, plan.destination)]
+            .compactMap { runway, airport in runway.map { ($0, airport) } }
+        var airports = routePlanner.ndPlanAirports
+        if showsRunwaysToScale {
+            for (runway, _) in runways where g.isInView(runway.coordinate, margin: 1.5) {
+                drawRunway(context, g.runwayShape(runway, minimumWidth: ND.runwayMinWidth,
+                                                  centrelineNm: ND.runwayCentrelineNm),
+                           ident: runway.fixIdent)
+            }
+        } else {
+            airports += runways.map(\.1)
+        }
+        for airport in airports where g.isInView(airport.coordinate) {
+            drawAirportSymbol(context, at: g.project(airport.coordinate), ident: airport.icao,
+                              color: .white, avoiding: routePoints)
+        }
+    }
+
+    private func drawRunway(_ context: GraphicsContext, _ shape: NDRunwayShape, ident: String) {
+        context.stroke(shape.centrelinePath, with: .color(.white),
+                       style: StrokeStyle(lineWidth: ND.lineWidth, dash: ND.runwayCentrelineDash))
+        context.fill(shape.outlinePath, with: .color(EFIS.background))
+        context.stroke(shape.outlinePath, with: .color(.white),
+                       style: StrokeStyle(lineWidth: ND.lineWidth, lineJoin: .miter))
+        let anchor = shape.labelAnchor(offset: ND.runwayMinWidth + 6)
+        text(context, ident, x: anchor.x, y: anchor.y, size: ND.fontMap, .white)
+    }
+
+    /// An airport: a star of four bars, its ident below right — moved to
+    /// the other side when that would put it across the flight plan.
+    private func drawAirportSymbol(_ context: GraphicsContext, at: CGPoint, ident: String,
+                                   color: Color, avoiding route: [CGPoint]) {
+        let r = ND.airportStarRadius
         var star = Path()
         for deg in stride(from: 0.0, to: 180, by: 45) {
             let a = deg * .pi / 180
             star.move(to: CGPoint(x: at.x - r * CGFloat(sin(a)), y: at.y - r * CGFloat(cos(a))))
             star.addLine(to: CGPoint(x: at.x + r * CGFloat(sin(a)), y: at.y + r * CGFloat(cos(a))))
         }
-        context.stroke(star, with: .color(EFIS.magenta), lineWidth: ND.routeWidth * 0.8)
-        text(context, ident, x: at.x + 1.6 * r, y: at.y + 1.2 * r, size: ND.fontMap, EFIS.magenta)
+        context.stroke(star, with: .color(EFIS.background), lineWidth: ND.routeWidth * 1.8)
+        context.stroke(star, with: .color(color), lineWidth: ND.routeWidth * 0.8)
+
+        let width = CGFloat(ident.count) * ND.advance(ND.fontMap), height = ND.fontMap
+        let dx = 1.6 * r, dy = 1.2 * r
+        let candidates = [
+            CGRect(x: at.x + dx, y: at.y + dy - height / 2, width: width, height: height),
+            CGRect(x: at.x + dx, y: at.y - dy - height / 2, width: width, height: height),
+            CGRect(x: at.x - dx - width, y: at.y + dy - height / 2, width: width, height: height),
+            CGRect(x: at.x - dx - width, y: at.y - dy - height / 2, width: width, height: height),
+        ]
+        let label = NDLabels.place(candidates, avoiding: route)
+        text(context, ident, x: label.minX, y: label.midY, size: ND.fontMap, color)
     }
 
     private func drawWaypointSymbol(_ context: GraphicsContext, at: CGPoint,
                                     ident: String, color: Color) {
-        let half: CGFloat = 8.5
+        let half = ND.waypointHalf
         var diamond = Path()
         diamond.move(to: CGPoint(x: at.x, y: at.y - half))
         diamond.addLine(to: CGPoint(x: at.x + half, y: at.y))
@@ -376,6 +496,64 @@ struct NDView: View {
         context.stroke(diamond, with: .color(color), lineWidth: ND.routeWidth)
         // Ident below and to the right of the symbol.
         text(context, ident, x: at.x + 2.3 * half, y: at.y + 1.5 * half, size: ND.fontMap, color)
+    }
+
+    /// Altitude constraint: a circle round the waypoint, magenta while the
+    /// constraint is predicted to be met. Amber (predicted missed) needs FMS
+    /// predictions and the constraint's type, neither of which the plan
+    /// carries, so only the met state is drawn.
+    private func drawConstraintCircle(_ context: GraphicsContext, at: CGPoint, constraintFt: Double) {
+        let r = ND.constraintCircleRadius
+        let circle = Path(ellipseIn: CGRect(x: at.x - r, y: at.y - r, width: 2 * r, height: 2 * r))
+        context.stroke(circle, with: .color(EFIS.background), lineWidth: ND.routeWidth * 1.85)
+        context.stroke(circle, with: .color(EFIS.magenta), lineWidth: ND.routeWidth)
+    }
+
+    /// Level-off (top of climb): a rising stroke into a level arrow, its
+    /// knee on the point. Upright on the screen whatever the heading.
+    private func drawLevelOffSymbol(_ context: GraphicsContext, at: CGPoint, color: Color) {
+        let s = ND.profileSymbolSize
+        var p = Path()
+        p.move(to: CGPoint(x: at.x - s, y: at.y + 0.7 * s))
+        p.addLine(to: at)
+        p.addLine(to: CGPoint(x: at.x + s, y: at.y))
+        p.move(to: CGPoint(x: at.x + 0.55 * s, y: at.y - 0.35 * s))
+        p.addLine(to: CGPoint(x: at.x + s, y: at.y))
+        p.addLine(to: CGPoint(x: at.x + 0.55 * s, y: at.y + 0.35 * s))
+        strokeProfileSymbol(context, p, color)
+    }
+
+    /// Top of descent: a level stroke into a descending arrow, its knee on
+    /// the point.
+    private func drawTopOfDescentSymbol(_ context: GraphicsContext, at: CGPoint, color: Color) {
+        let s = ND.profileSymbolSize
+        let tip = CGPoint(x: at.x + 0.85 * s, y: at.y + 0.6 * s)
+        var p = Path()
+        p.move(to: CGPoint(x: at.x - s, y: at.y))
+        p.addLine(to: at)
+        p.addLine(to: tip)
+        // Arrowhead along the descending stroke.
+        let a = atan2(tip.y - at.y, tip.x - at.x), head = 0.45 * s, spread = 0.45
+        p.move(to: CGPoint(x: tip.x - head * cos(a - spread), y: tip.y - head * sin(a - spread)))
+        p.addLine(to: tip)
+        p.addLine(to: CGPoint(x: tip.x - head * cos(a + spread), y: tip.y - head * sin(a + spread)))
+        strokeProfileSymbol(context, p, color)
+    }
+
+    /// Decelerate point: a "D" in a circle.
+    private func drawDecelSymbol(_ context: GraphicsContext, at: CGPoint, color: Color) {
+        let r = ND.decelRadius
+        let circle = Path(ellipseIn: CGRect(x: at.x - r, y: at.y - r, width: 2 * r, height: 2 * r))
+        context.fill(circle, with: .color(EFIS.background))
+        context.stroke(circle, with: .color(color), lineWidth: ND.routeWidth)
+        text(context, "D", x: at.x, y: at.y, size: ND.fontMap * 0.85, color, anchor: .center)
+    }
+
+    private func strokeProfileSymbol(_ context: GraphicsContext, _ path: Path, _ color: Color) {
+        context.stroke(path, with: .color(EFIS.background),
+                       style: StrokeStyle(lineWidth: ND.routeWidth * 2.2, lineCap: .round, lineJoin: .round))
+        context.stroke(path, with: .color(color),
+                       style: StrokeStyle(lineWidth: ND.routeWidth * 1.2, lineCap: .round, lineJoin: .round))
     }
 
     // MARK: Aircraft symbol
@@ -473,7 +651,7 @@ struct NDView: View {
     /// along-route distance and ETA — not the final destination's.
     /// Right-aligned on the canvas edge, column by column.
     private func drawToWaypoint(_ context: GraphicsContext) {
-        guard let waypoint = routePlanner.activeWaypoint else { return }
+        guard let waypoint = routePlanner.toWaypoint else { return }
 
         let edge = ND.canvas - Self.blockMargin
         let large = ND.advance(ND.fontIntermediate), small = ND.advance(ND.fontSmallest)
