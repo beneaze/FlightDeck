@@ -35,7 +35,25 @@ struct Guidance {
     var glideDeviation: Double? {
         guard let distance = routePlanner.distanceToGoNm(from: flightData.location),
               distance > 0.3 else { return nil }
-        let onPathFt = distance * 6_076.12 * tan(3 * .pi / 180)
+        let onPathFt = touchdownElevationFt + distance * 6_076.12 * tan(3 * .pi / 180)
         return ((flightData.altitudeFt - onPathFt) / 600).clamped(to: -1...1)
+    }
+
+    /// Where the 3° path meets the ground: the approach runway's threshold,
+    /// else the destination airport; a road destination is taken as sea
+    /// level, as before.
+    private var touchdownElevationFt: Double {
+        guard let plan = routePlanner.flightPlan else { return 0 }
+        return plan.approachRunway?.elevationFt ?? plan.destination.elevationFt
+    }
+
+    /// Final approach: from the intercept point in (12 NM out on a flight,
+    /// with some margin), or the last mile of a road route. The LOC and
+    /// G/S scales show only then, as on the real displays, which show them
+    /// once the approach is armed rather than all flight long.
+    var isOnFinalApproach: Bool {
+        guard let distance = routePlanner.distanceToGoNm(from: flightData.location) else { return false }
+        let finalNm = routePlanner.transportMode == .plane ? FlightPlan.interceptNm + 3 : 1
+        return distance <= finalNm
     }
 }

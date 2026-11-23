@@ -612,11 +612,11 @@ struct PFDView: View {
 
     // MARK: - Deviation scales
 
-    /// LOC and G/S scales. There is no ILS receiver here, so these are driven by
-    /// the direct-to course and a 3° reference path to the destination — a CDI
-    /// in ILS clothing, not a real localiser.
+    /// LOC and G/S scales, on final approach only. There is no ILS receiver
+    /// here, so these are driven by the guidance course and a 3° reference
+    /// path to the destination — a CDI in ILS clothing, not a real localiser.
     private func drawDeviationScales(_ context: GraphicsContext) {
-        guard routePlanner.destination != nil else { return }
+        guard routePlanner.destination != nil, guidance.isOnFinalApproach else { return }
         let center = PFD.horizonCenter
 
         // Localiser: dots below the attitude window; glideslope: dots to its

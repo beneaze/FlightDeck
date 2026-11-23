@@ -188,7 +188,7 @@ struct BoeingPFDView: View {
     /// driven — as on the A320 PFD — by the guidance course and a 3° path to
     /// the destination.
     private func drawDeviationScales(_ context: GraphicsContext) {
-        guard routePlanner.destination != nil else { return }
+        guard routePlanner.destination != nil, guidance.isOnFinalApproach else { return }
         let c = B737PFD.horizonCenter
         let frame = B737PFD.attitudeFrame
         let spacing: CGFloat = 7.1
