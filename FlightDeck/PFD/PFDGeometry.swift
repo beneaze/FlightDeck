@@ -163,6 +163,14 @@ enum PFD {
     /// Display units per foot: the tape shows about ±570 ft.
     static var altScale: CGFloat { tapeHalfHeight / 570 }
 
+    /// The ground reference: a red ribbon in the strip just outboard of the
+    /// tape, between it and the V/S scale — the counterpart of the speed
+    /// tape's barber pole on the other side. Its top edge marks the ground;
+    /// the altitude readout's drum covers it where they cross.
+    static var groundRibbon: CGRect {
+        CGRect(x: altTape.maxX, y: tapeTop, width: 1.6, height: 2 * tapeHalfHeight)
+    }
+
     // MARK: - Vertical speed
 
     /// Inboard edge of the V/S strip.

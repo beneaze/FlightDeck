@@ -398,16 +398,16 @@ struct PFDView: View {
             clipped.stroke(bug, with: .color(EFIS.cyan), lineWidth: 0.5)
         }
 
-        // The ground: a red band from the terrain elevation down the tape's
-        // inboard edge, with a line across the tape at the ground itself.
+        // The ground: a red ribbon outboard of the tape, from the terrain
+        // elevation down to the tape's foot. Drawn before the readout, so the
+        // drum box sits on top of it.
         if let ground = groundElevationFt {
-            let gy = y(for: ground)
-            if gy < tape.maxY {
-                let top = max(gy, tape.minY)
-                clipped.fill(Path(CGRect(x: tape.minX, y: top, width: 1.3, height: tape.maxY - top)),
+            let ribbon = PFD.groundRibbon
+            let top = max(y(for: ground), ribbon.minY)
+            if top < ribbon.maxY {
+                context.fill(Path(CGRect(x: ribbon.minX, y: top,
+                                         width: ribbon.width, height: ribbon.maxY - top)),
                              with: .color(EFIS.red))
-                clipped.line(from: CGPoint(x: tape.minX, y: gy), to: CGPoint(x: tape.maxX, y: gy),
-                             EFIS.red, width: Style.medium)
             }
         }
 
