@@ -132,6 +132,28 @@ RANGE in the scratchpad.
 
 The MCDU is our own drawing, laid out parametrically like the displays.
 
+## Glareshield panel (FCU / MCP)
+
+A left swipe on the displays brings up the panel above them: beside the
+A320 displays the **FCU** with the EFIS panel's FD and LS pushbuttons,
+beside the 737's the **MCP**. A right swipe or DISPLAYS puts it away. In
+portrait the wide panel is shown in sections one above the other.
+
+| | A320 FCU | 737 MCP |
+|---|---|---|
+| Speed | SPD knob: turn to select, tap (push) for managed, hold (pull) for selected | IAS/MACH knob, SPEED / VNAV |
+| Heading | HDG knob: turn or pull for HDG, push for NAV | HEADING knob moves the bug; HDG SEL / LNAV |
+| Altitude | ALT knob, 100 / 1000 ft step | ALTITUDE knob, ALT HLD |
+| Vertical speed | V/S knob: turn or pull for V/S, push to level off | VERT SPEED knob, V/S |
+| Approach | LOC, APPR | VOR LOC, APP |
+| Flight director, autopilot | FD, AP1, AP2, A/THR | F/D, A/T ARM, CMD A, CMD B |
+
+The panel drives the displays, not the vehicle: the speed and heading
+bugs, the flight director's commands, and the FMA. LOC and G/S show armed
+(cyan on the A320, small white on the 737) and change to captured on
+final approach, where the flight director then follows the approach course.
+The LOC and G/S scales appear on final approach, or with LS pushed.
+
 ## Plane mode
 
 For passengers: on the MCDU's MENU page choose **PLANE**, then open the INIT (A320) / RTE (737) page.
@@ -292,10 +314,12 @@ FlightDeck/
 │   ├── FlightPackStore.swift    Offline flight packs
 │   ├── Airports.swift           Bundled airport and airline tables
 │   ├── NavDatabase.swift        Bundled runways and navaids, waypoint entry parsing
+│   ├── AutoFlight.swift         FCU / MCP state: targets, modes, FD, AP, approach
 │   ├── AircraftProfile.swift    Per-aircraft envelope and tape scales (A320, B737)
 │   ├── DisplayStyle.swift       Which flight deck the displays imitate
 │   └── Guidance.swift           Course and path deviation from the flight plan
 ├── Menu/
+│   ├── FCU/FCUView.swift        Glareshield panel: A320 FCU + EFIS FD/LS, 737 MCP
 │   ├── MCDU/                    The MCDU: all settings, route and flight setup
 │   │   ├── MCDUStyle.swift      Airbus MCDU / Boeing CDU look, keys, screen types
 │   │   ├── MCDUController.swift Keys, scratchpad, actions

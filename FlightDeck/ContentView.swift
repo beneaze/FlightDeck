@@ -7,13 +7,21 @@ import SwiftUI
 ///
 /// A right swipe brings up the MCDU, where the route or flight is set up and
 /// every setting lives; a left swipe (or its DISPLAYS key) puts it away.
+/// A left swipe on the displays brings up the glareshield panel — the A320
+/// FCU or the 737 MCP — which a right swipe puts away.
 struct ContentView: View {
     @EnvironmentObject private var flightData: FlightDataModel
     @EnvironmentObject private var routePlanner: RoutePlanner
     @EnvironmentObject private var speedLimits: SpeedLimitProvider
     @EnvironmentObject private var flightPacks: FlightPackStore
 
-    @State private var isMenuOpen = false
+    /// The MCDU or the glareshield panel, whichever is up — one cover, as
+    /// two on one view do not present reliably.
+    @State private var cover: Cover?
+    private enum Cover: Identifiable {
+        case mcdu, panel
+        var id: Self { self }
+    }
     @StateObject private var mcdu = MCDUController()
     @AppStorage(SafetyNoticeView.acceptedKey) private var hasAcceptedSafetyNotice = false
 
@@ -41,8 +49,11 @@ struct ContentView: View {
                 }
 
             }
-            .fullScreenCover(isPresented: $isMenuOpen) {
-                MCDUView(controller: mcdu)
+            .fullScreenCover(item: $cover) { which in
+                switch which {
+                case .mcdu: MCDUView(controller: mcdu)
+                case .panel: FCUView(flightData: flightData) { cover = nil }
+                }
             }
             .simultaneousGesture(
                 DragGesture(minimumDistance: 30)
@@ -52,6 +63,7 @@ struct ContentView: View {
                         guard abs(value.translation.width) > abs(value.translation.height)
                         else { return }
                         if value.translation.width > 60 { setMenu(open: true) }
+                        if value.translation.width < -60 { cover = .panel }
                     }
             )
         }
@@ -75,7 +87,7 @@ struct ContentView: View {
         .onAppear {
             mcdu.attach(routePlanner: routePlanner, flightData: flightData,
                         packs: flightPacks, speedLimits: speedLimits)
-            mcdu.close = { isMenuOpen = false }
+            mcdu.close = { cover = nil }
             syncFlightMode()
         }
         .onChange(of: routePlanner.transportMode) { syncFlightMode() }
@@ -165,7 +177,7 @@ struct ContentView: View {
     }
 
     private func setMenu(open: Bool) {
-        isMenuOpen = open
+        cover = open ? .mcdu : nil
     }
 }
 

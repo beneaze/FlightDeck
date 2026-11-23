@@ -147,9 +147,9 @@ struct BoeingPFDView: View {
     /// Magenta cross bars. With no autopilot to follow they command the flight
     /// path back to the selected altitude and the guidance course.
     private func drawFlightDirector(_ context: GraphicsContext, pitchOffset: CGFloat) {
+        guard flightData.autoFlight.flightDirector else { return }
         let c = B737PFD.horizonCenter
-        let pitchCommand = ((flightData.selectedAltitudeFt - flightData.altitudeFt) / 1_000)
-            .clamped(to: -10...10)
+        let pitchCommand = guidance.pitchCommandDeg
         let reach = B737PFD.frameHalfHeight * 0.6
         let barY = c.y + (pitchOffset - CGFloat(pitchCommand) * B737PFD.pixelsPerDegreePitch)
             .clampedTo(-reach...reach)
@@ -188,7 +188,7 @@ struct BoeingPFDView: View {
     /// driven — as on the A320 PFD — by the guidance course and a 3° path to
     /// the destination.
     private func drawDeviationScales(_ context: GraphicsContext) {
-        guard routePlanner.destination != nil, guidance.isOnFinalApproach else { return }
+        guard guidance.showsDeviationScales else { return }
         let c = B737PFD.horizonCenter
         let frame = B737PFD.attitudeFrame
         let spacing: CGFloat = 7.1
@@ -204,7 +204,7 @@ struct BoeingPFDView: View {
         context.fill(Path(CGRect(x: gsX - 1.4, y: B737PFD.tapeCenterY - 0.3, width: 2.8, height: 0.6)),
                      with: .color(Boeing.white))
 
-        let loc = (guidance.courseError / 10).clamped(to: -1...1)
+        let loc = (guidance.localizerError / 10).clamped(to: -1...1)
         drawDiamond(context, at: CGPoint(x: c.x + CGFloat(loc) * 2 * spacing, y: locY))
         if let deviation = guidance.glideDeviation {
             drawDiamond(context, at: CGPoint(x: gsX, y: B737PFD.tapeCenterY - CGFloat(deviation) * 2 * spacing))
@@ -284,9 +284,10 @@ struct BoeingPFDView: View {
                              CGPoint(x: x + 1.0, y: tip + back)], fill: Boeing.green)
         }
 
-        // MCP speed bug — the speed limit, when one is known — a magenta
-        // pentagon on the inboard edge, parked at the tape's end when off it.
-        if let limit = speedLimits.limitKts {
+        // MCP speed bug — the MCP speed when one is selected, else the
+        // speed limit when one is known — a magenta pentagon on the inboard
+        // edge, parked at the tape's end when off it.
+        if let limit = flightData.autoFlight.selectedSpeedKts ?? speedLimits.limitKts {
             let half: CGFloat = 1.8
             let by = y(limit * unit).clampedTo(tape.minY + half...tape.maxY - half)
             let tip = tape.maxX - 0.2
@@ -576,10 +577,11 @@ struct BoeingPFDView: View {
         track.rotate(by: .degrees(flightData.driftAngleDeg))
         track.line(from: CGPoint(x: 0, y: -(r - 9)), to: CGPoint(x: 0, y: -(r - 0.9)), Boeing.white, width: Style.line)
 
-        // MCP heading bug on the rim: the guidance course while a route is
-        // active, with its value beside the rose.
+        // MCP heading bug on the rim: the MCP heading once set, else the
+        // guidance course while a route is active, with its value beside
+        // the rose.
         let annunciationY = B737PFD.compassTop - 1.2
-        if let course = guidance.bearing {
+        if let course = flightData.autoFlight.headingTargetDeg ?? guidance.bearing {
             let diff = angularDifference(course, heading)
             if abs(diff) <= 60 {
                 var bug = context
@@ -628,10 +630,16 @@ struct BoeingPFDView: View {
                          Boeing.white, width: 0.2)
         }
 
-        // AFDS status over the attitude frame.
-        context.boeingText(flightData.isDemoMode ? "DEMO" : "FD",
-                           at: CGPoint(x: B737PFD.horizonCenter.x, y: B737PFD.attitudeFrame.minY - 2.4),
-                           size: Style.label, flightData.isDemoMode ? Boeing.amber : Boeing.green)
+        // AFDS status over the attitude frame: CMD with an autopilot
+        // engaged, FD with only the flight director on.
+        let af = flightData.autoFlight
+        let status = flightData.isDemoMode ? "DEMO"
+            : (af.autopilot1 || af.autopilot2) ? "CMD" : af.flightDirector ? "FD" : ""
+        if !status.isEmpty {
+            context.boeingText(status,
+                               at: CGPoint(x: B737PFD.horizonCenter.x, y: B737PFD.attitudeFrame.minY - 2.4),
+                               size: Style.label, flightData.isDemoMode ? Boeing.amber : Boeing.green)
+        }
     }
 
     private typealias FMAMode = (active: String, armed: String)
@@ -641,26 +649,36 @@ struct BoeingPFDView: View {
         let error = flightData.selectedAltitudeFt - flightData.altitudeFt
         let vs = flightData.verticalSpeedFpm
         let routing = routePlanner.destination != nil
+        let af = flightData.autoFlight
 
         let thrust: String
-        if vs > 500 { thrust = "N1" }
+        if !af.autothrust { thrust = "" }
+        else if af.selectedSpeedKts != nil { thrust = "MCP SPD" }
+        else if vs > 500 { thrust = "N1" }
         else if vs < -500 { thrust = "ARM" }
         else { thrust = speedLimits.limitKts != nil ? "FMC SPD" : "MCP SPD" }
 
-        let pitch: FMAMode
-        if abs(error) < 250 {
+        var pitch: FMAMode
+        if guidance.isGlideslopeCaptured {
+            pitch = ("G/S", "")
+        } else if abs(error) < 250 {
             pitch = (abs(vs) < 200 ? "ALT HOLD" : "ALT ACQ", "")
+        } else if af.selectedVerticalSpeedFpm != nil {
+            pitch = ("V/S", "")
         } else if abs(vs) > 200 {
             pitch = ("LVL CHG", "")
         } else {
             pitch = ("ALT HOLD", "")
         }
+        if af.approachArmed && !guidance.isGlideslopeCaptured { pitch.armed = "G/S" }
 
-        return [
-            (thrust, ""),
-            (routing ? "LNAV" : "HDG SEL", ""),
-            pitch,
-        ]
+        var roll: FMAMode
+        if guidance.isLocalizerCaptured { roll = ("VOR/LOC", "") }
+        else if af.selectedHeadingDeg != nil || !routing { roll = ("HDG SEL", "") }
+        else { roll = ("LNAV", "") }
+        if af.isLocalizerArmed && !guidance.isLocalizerCaptured { roll.armed = "VOR/LOC" }
+
+        return [(thrust, ""), roll, pitch]
     }
 
     // MARK: - Corner blocks

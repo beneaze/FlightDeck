@@ -24,12 +24,50 @@ struct Guidance {
             .vector(to: target).bearingDeg
     }
 
-    /// Signed error between the guidance course and the actual track, in
-    /// degrees, positive right.
-    var courseError: Double {
+    /// What the flight director steers to: the selected heading in HDG
+    /// (HDG SEL), else the route.
+    var commandBearing: Double? {
+        // Once the localiser is captured it is flown, whatever the heading.
+        isLocalizerCaptured ? bearing : (flightData.autoFlight.selectedHeadingDeg ?? bearing)
+    }
+
+    /// The localiser deviation: the route's course against the track,
+    /// whatever heading is selected.
+    var localizerError: Double {
         guard let bearing else { return 0 }
         return angularDifference(bearing, flightData.trackDeg)
     }
+
+    /// Signed error between the commanded course and the actual track, in
+    /// degrees, positive right.
+    var courseError: Double {
+        guard let commandBearing else { return 0 }
+        return angularDifference(commandBearing, flightData.trackDeg)
+    }
+
+    /// The flight director's pitch command relative to the present
+    /// attitude, degrees: in V/S, the flight-path angle the selected
+    /// vertical speed asks for at this speed, less the present one;
+    /// otherwise one degree per 1000 ft to the selected altitude.
+    var pitchCommandDeg: Double {
+        if let target = flightData.autoFlight.selectedVerticalSpeedFpm {
+            let groundFpm = max(flightData.groundSpeedKts, 30) * 101.27
+            let want = atan(target / groundFpm) * 180 / .pi
+            let now = atan(flightData.verticalSpeedFpm / groundFpm) * 180 / .pi
+            return (want - now).clamped(to: -10...10)
+        }
+        return ((flightData.selectedAltitudeFt - flightData.altitudeFt) / 1_000).clamped(to: -10...10)
+    }
+
+    /// The approach scales: on final approach, or any time with the Airbus
+    /// LS pushbutton on.
+    var showsDeviationScales: Bool {
+        routePlanner.destination != nil && (isOnFinalApproach || flightData.autoFlight.landingSystem)
+    }
+
+    /// LOC / G/S captured: armed, and on final.
+    var isLocalizerCaptured: Bool { flightData.autoFlight.isLocalizerArmed && isOnFinalApproach }
+    var isGlideslopeCaptured: Bool { flightData.autoFlight.approachArmed && isOnFinalApproach }
 
     /// Deviation from a 3° path to the destination, normalised to ±1 full scale.
     var glideDeviation: Double? {

@@ -97,10 +97,9 @@ struct PFDView: View {
     /// With no autopilot to follow, they command the flight path back to the
     /// selected altitude and the direct-to course.
     private func drawFlightDirector(_ context: GraphicsContext) {
+        guard autoFlight.flightDirector else { return }
         let center = PFD.horizonCenter
-        let pitchCommand = (flightData.selectedAltitudeFt - flightData.altitudeFt) / 1_000
-        let barY = center.y - PFD.horizonOffset(pitch: pitchCommand.clamped(to: -10...10))
-            + PFD.horizonOffset(pitch: flightData.pitchDeg)
+        let barY = center.y - PFD.horizonOffset(pitch: guidance.pitchCommandDeg)
         let rollCommand = courseError.clamped(to: -20...20)
         let barX = center.x + CGFloat(rollCommand) * 0.57
         // Each bar reaches a little under half-way to the window's sides.
@@ -271,6 +270,26 @@ struct PFDView: View {
         // Speed trend arrow — where the speed will be in 10 seconds.
         if flightData.isSpeedTrendShown {
             drawTrendArrow(clipped, trend: flightData.speedTrendKts * unit, centerY: centerY)
+        }
+
+        // Selected speed: a cyan triangle on the tape's edge, or the value
+        // in cyan above or below the tape when it is off the scale.
+        if let selected = autoFlight.selectedSpeedKts.map({ $0 * unit }) {
+            let sy = y(for: selected)
+            if sy < tape.minY {
+                context.digits("\(Int(selected.rounded()))", at: CGPoint(x: tape.midX, y: tape.minY - 2.0),
+                               size: Style.speedType, EFIS.cyan)
+            } else if sy > tape.maxY {
+                context.digits("\(Int(selected.rounded()))", at: CGPoint(x: tape.midX, y: tape.maxY + 2.0),
+                               size: Style.speedType, EFIS.cyan)
+            } else {
+                var bug = Path()
+                bug.move(to: CGPoint(x: tape.maxX - 0.3, y: sy))
+                bug.addLine(to: CGPoint(x: tape.maxX + 2.0, y: sy - 1.2))
+                bug.addLine(to: CGPoint(x: tape.maxX + 2.0, y: sy + 1.2))
+                bug.closeSubpath()
+                context.fill(bug, with: .color(EFIS.cyan))
+            }
         }
 
         // Fixed yellow airspeed reference: a thin bar riding into the tape,
@@ -605,6 +624,25 @@ struct PFDView: View {
             }
         }
 
+        // Selected heading: a cyan triangle on the scale, or its value at
+        // the side it lies on when off the tape.
+        if let selected = autoFlight.selectedHeadingDeg {
+            let diff = angularDifference(selected, heading)
+            let hx = x(for: heading + diff)
+            if tape.minX + 1...tape.maxX - 1 ~= hx {
+                var bug = Path()
+                bug.move(to: CGPoint(x: hx, y: tape.minY + 0.3))
+                bug.addLine(to: CGPoint(x: hx - 1.2, y: tape.minY - 1.9))
+                bug.addLine(to: CGPoint(x: hx + 1.2, y: tape.minY - 1.9))
+                bug.closeSubpath()
+                context.fill(bug, with: .color(EFIS.cyan))
+            } else {
+                context.digits(String(format: "%03d", Int(selected.rounded()) % 360),
+                               at: CGPoint(x: diff > 0 ? tape.maxX - 3 : tape.minX + 3, y: tape.minY - 2.0),
+                               size: Style.scaleType - 0.4, EFIS.cyan)
+            }
+        }
+
         // Yellow lubber line at the current heading.
         context.line(from: CGPoint(x: centerX, y: tape.minY - 2.9),
                      to: CGPoint(x: centerX, y: tape.minY + 2.14), EFIS.yellow, width: Style.heavy)
@@ -616,7 +654,7 @@ struct PFDView: View {
     /// here, so these are driven by the guidance course and a 3° reference
     /// path to the destination — a CDI in ILS clothing, not a real localiser.
     private func drawDeviationScales(_ context: GraphicsContext) {
-        guard routePlanner.destination != nil, guidance.isOnFinalApproach else { return }
+        guard guidance.showsDeviationScales else { return }
         let center = PFD.horizonCenter
 
         // Localiser: dots below the attitude window; glideslope: dots to its
@@ -628,7 +666,7 @@ struct PFDView: View {
             drawDot(context, at: CGPoint(x: center.x + n * spacing, y: locY))
             drawDot(context, at: CGPoint(x: gsX, y: center.y + n * spacing))
         }
-        let locDeviation = (courseError / 10).clamped(to: -1...1)
+        let locDeviation = (guidance.localizerError / 10).clamped(to: -1...1)
         drawDiamond(context, at: CGPoint(x: center.x + CGFloat(locDeviation) * 2 * spacing, y: locY))
         if let deviation = glideDeviation {
             drawDiamond(context, at: CGPoint(x: gsX, y: center.y - CGFloat(deviation) * 2 * spacing))
@@ -743,16 +781,25 @@ struct PFDView: View {
         let error = flightData.selectedAltitudeFt - flightData.altitudeFt
         let vs = flightData.verticalSpeedFpm
         let navEngaged = routePlanner.destination != nil
+        let af = autoFlight
 
+        // Thrust: with A/THR off the crew has the levers and the column is
+        // empty.
         let thrust: String
-        if vs > 500 { thrust = "THR CLB" }
-        else if vs < -500 { thrust = "THR IDLE" }
+        if !af.autothrust { thrust = "" }
+        else if vs > 500 && af.selectedVerticalSpeedFpm == nil { thrust = "THR CLB" }
+        else if vs < -500 && af.selectedVerticalSpeedFpm == nil { thrust = "THR IDLE" }
         else { thrust = flightData.machNumber >= 0.5 ? "MACH" : "SPEED" }
 
-        let vertical: FMAEntry
+        var vertical: FMAEntry
         var verticalArmed: FMAEntry = ("", EFIS.cyan)
-        if abs(error) < 250 {
+        if guidance.isGlideslopeCaptured {
+            vertical = ("G/S", EFIS.green)
+        } else if abs(error) < 250 {
             vertical = (abs(vs) < 200 ? "ALT CRZ" : "ALT*", EFIS.green)
+        } else if let target = af.selectedVerticalSpeedFpm {
+            vertical = (String(format: "V/S %+d", Int(target)), EFIS.green)
+            verticalArmed = ("ALT", EFIS.cyan)
         } else if vs > 200 {
             vertical = ("CLB", EFIS.green)
             verticalArmed = (error > 0 ? "ALT" : "", EFIS.cyan)
@@ -762,19 +809,39 @@ struct PFDView: View {
         } else {
             vertical = ("ALT CRZ", EFIS.green)
         }
+        if af.approachArmed && !guidance.isGlideslopeCaptured {
+            verticalArmed = ("G/S", EFIS.cyan)
+        }
+
+        let lateral: FMAEntry
+        if guidance.isLocalizerCaptured { lateral = ("LOC", EFIS.green) }
+        else if af.selectedHeadingDeg != nil || !navEngaged { lateral = ("HDG", EFIS.green) }
+        else { lateral = ("NAV", EFIS.green) }
+        let lateralArmed: FMAEntry = af.isLocalizerArmed && !guidance.isLocalizerCaptured
+            ? ("LOC", EFIS.cyan) : ("", .white)
+
+        let autopilot: String
+        switch (af.autopilot1, af.autopilot2) {
+        case (true, true): autopilot = "AP1+2"
+        case (true, false): autopilot = "AP1"
+        case (false, true): autopilot = "AP2"
+        default: autopilot = ""
+        }
+        let demo: FMAEntry = (flightData.isDemoMode ? "DEMO" : "", EFIS.amber)
 
         return [
             [(thrust, EFIS.green), ("", .white), ("", .white)],
             [vertical, verticalArmed, ("", .white)],
-            [(navEngaged ? "NAV" : "HDG", EFIS.green), ("", .white), ("", .white)],
-            [(flightData.isDemoMode ? "DEMO" : "", EFIS.amber), ("", .white), ("", .white)],
-            [("AP1", .white), ("1 FD 2", .white), ("A/THR", .white)],
+            [lateral, lateralArmed, ("", .white)],
+            af.approachArmed ? [("CAT 1", .white), ("", .white), demo] : [demo, ("", .white), ("", .white)],
+            [(autopilot, .white), (af.flightDirector ? "1 FD 2" : "", .white), (af.autothrust ? "A/THR" : "", .white)],
         ]
     }
 
     // MARK: - Derived guidance
 
     private var guidance: Guidance { Guidance(flightData: flightData, routePlanner: routePlanner) }
+    private var autoFlight: AutoFlight { flightData.autoFlight }
     private var guidanceBearing: Double? { guidance.bearing }
     private var courseError: Double { guidance.courseError }
     private var glideDeviation: Double? { guidance.glideDeviation }

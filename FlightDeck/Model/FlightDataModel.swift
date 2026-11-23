@@ -118,6 +118,8 @@ final class FlightDataModel: NSObject, ObservableObject {
 
     /// FCU selected altitude — the cyan bug on the altitude tape.
     @Published var selectedAltitudeFt: Double = 3_000
+    /// The rest of the FCU / MCP: speed, heading, V/S, FD, AP, approach.
+    @Published var autoFlight = AutoFlight()
     /// True while the baro reference is STD (above transition altitude).
     @Published var isStandardBaro: Bool = true
 
