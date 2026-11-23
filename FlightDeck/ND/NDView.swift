@@ -283,15 +283,20 @@ struct NDView: View {
         ctx.translateBy(x: ND.center.x, y: ND.center.y)
         ctx.rotate(by: .degrees(diff))
 
-        // The line stops where the lubber line begins, so the two never
-        // overlap when track and heading agree.
-        var line = Path()
-        line.move(to: CGPoint(x: 0, y: -(ND.ringRadius - ND.lubberHalfLength)))
-        line.addLine(to: .zero)
-        ctx.stroke(line, with: .color(EFIS.background),
-                   style: StrokeStyle(lineWidth: ND.lineWidth * 1.5, lineCap: .round))
-        ctx.stroke(line, with: .color(EFIS.green),
-                   style: StrokeStyle(lineWidth: ND.lineWidth * 1.25, lineCap: .round))
+        // The track line, as on the real ND, only while a heading is
+        // selected (HDG / TRK) or there is no route to fly in NAV; in
+        // managed NAV the flight-plan line takes its place and only the
+        // diamond shows. It stops where the lubber line begins, so the two
+        // never overlap when track and heading agree.
+        if flightData.autoFlight.isHeadingSelected || routePlanner.destination == nil {
+            var line = Path()
+            line.move(to: CGPoint(x: 0, y: -(ND.ringRadius - ND.lubberHalfLength)))
+            line.addLine(to: .zero)
+            ctx.stroke(line, with: .color(EFIS.background),
+                       style: StrokeStyle(lineWidth: ND.lineWidth * 1.5, lineCap: .round))
+            ctx.stroke(line, with: .color(EFIS.green),
+                       style: StrokeStyle(lineWidth: ND.lineWidth * 1.25, lineCap: .round))
+        }
 
         // The diamond hangs from the ring, and disappears once the drift
         // angle would carry it off the visible sector.
