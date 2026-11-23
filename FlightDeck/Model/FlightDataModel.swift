@@ -69,6 +69,7 @@ enum RollSource: String, CaseIterable {
 /// - `rollDeg`  positive = right bank.
 /// - `headingDeg` = magnetic heading while (nearly) stationary, GPS track
 ///   while moving — GPS track is far more reliable in a moving vehicle.
+///   In plane mode it is always the track, from ``PlaneModeEstimator``.
 ///
 /// GPS reports about once a second; the motion sensors sixty times a second.
 /// Everything the displays draw is stepped at the motion rate — the speed
@@ -150,16 +151,31 @@ final class FlightDataModel: NSObject, ObservableObject {
     /// Riding in an airliner rather than driving: set from the PLANE
     /// transport mode. In the cabin the barometer reads cabin pressure, the
     /// compass sits among metal and wiring, and a coordinated turn leaves no
-    /// lateral force to sense — so vertical speed comes from GPS altitude,
-    /// heading from GPS track, bank from the rate of turn and pitch from the
-    /// flight path.
+    /// lateral force to sense. ``PlaneModeEstimator`` then supplies
+    /// attitude, track and altitude: the gyro for every fast change,
+    /// corrected toward the coordinated-turn bank, the flight path and the
+    /// GPS course and altitude.
     @Published var isFlightMode = false {
         didSet {
             guard isFlightMode != oldValue else { return }
             verticalSpeedTargetFpm = 0
             lastBaroSample = nil
+            lastAltitudeSample = nil
+            planeEstimator = PlaneModeEstimator(trackDeg: trackDeg)
+            if isFlightMode {
+                if altitudeAnchorFt != nil {
+                    planeEstimator.seedAltitude(feet: altitudeFt, verticalSpeedFpm: 0)
+                }
+            } else {
+                // Back on the road: restart the track from the next fix and
+                // carry on from the altitude plane mode left on display.
+                trackAnchorDeg = nil
+                if altitudeAnchorFt != nil { altitudeAnchorFt = altitudeFt }
+            }
         }
     }
+    /// Plane-mode sensor fusion; idle outside plane mode.
+    private var planeEstimator = PlaneModeEstimator()
 
     /// In the Simulator, a flight plan for the demo to fly — climb, cruise
     /// and descent along its path — instead of the circuit over Boston.
@@ -340,6 +356,13 @@ final class FlightDataModel: NSObject, ObservableObject {
     /// roll read relative to however it happens to be mounted. Persists
     /// across launches; no-op until the first motion sample arrives.
     func calibrate() {
+        // In plane mode attitude is physical, not relative to a captured
+        // pose: attitude zero only tells the estimator where the phone now
+        // sits, and leaves the car's mounting calibration as it was.
+        if isFlightMode {
+            planeEstimator.reanchorMount()
+            return
+        }
         guard let gravity = lastGravity else { return }
         setCalibration(zeroGravity: gravity)
         UserDefaults.standard.set([gravity.x, gravity.y, gravity.z],
@@ -348,6 +371,10 @@ final class FlightDataModel: NSObject, ObservableObject {
 
     /// Return to the built-in reference: a vertical, panel-mounted phone.
     func clearCalibration() {
+        if isFlightMode {
+            planeEstimator.reanchorMount()
+            return
+        }
         calibrationRotation = nil
         isCalibrated = false
         UserDefaults.standard.removeObject(forKey: Self.calibrationKey)
@@ -431,6 +458,13 @@ final class FlightDataModel: NSObject, ObservableObject {
             // the rotation-rate component along gravity.
             let turnRate = simd_dot(rotationRate, g) * 180 / .pi
             _ = turnRateSmoother.step(toward: turnRate, deltaTime: dt)
+            if isFlightMode {
+                planeEstimator.step(
+                    dt: dt, time: Date().timeIntervalSinceReferenceDate,
+                    motion: .init(rotationRate: rotationRate, gravity: g, userAcceleration: acceleration),
+                    groundSpeedKts: groundSpeedKts)
+                applyPlaneEstimate()
+            }
             stepDeadReckoning(deltaTime: dt, headingRateDegPerSec: turnRate)
         } else {
             filteredAcceleration = acceleration
@@ -482,14 +516,10 @@ final class FlightDataModel: NSObject, ObservableObject {
         lateralG = -(rotate * filteredAcceleration).x
 
         if isFlightMode {
-            // A coordinated turn at bank φ and speed V turns at ω = g·tanφ/V,
-            // so the bank follows from the rate of turn and the ground speed
-            // (close enough to airspeed for a display). Pitch is the flight
-            // path angle: the phone's own tilt says nothing about the cabin.
-            let speedMps = groundSpeedKts * 0.514444
-            let omega = turnRateSmoother.value * .pi / 180
-            rollDeg = speedMps > 25 ? atan(speedMps * omega / 9.80665) * 180 / .pi : 0
-            pitchDeg = flightPathAngleDeg
+            // Attitude comes from the plane-mode estimator (applyPlaneEstimate);
+            // the slip ball reads lateral acceleration in its cabin frame.
+            pitchDeg = planeEstimator.pitchDeg
+            if let mount = planeEstimator.mount { lateralG = -(mount * filteredAcceleration).x }
             return
         }
 
@@ -517,7 +547,13 @@ final class FlightDataModel: NSObject, ObservableObject {
     }
 
     /// Prefer GPS track when moving; magnetic heading only when slow/stationary.
+    /// Never the magnetometer in plane mode: in the cabin it reads the
+    /// airframe's metal, and it points along the phone, not the nose.
     private func updateHeading() {
+        if isFlightMode {
+            headingDeg = trackDeg
+            return
+        }
         if groundSpeedKts > 3 {
             headingDeg = trackDeg
         } else {
@@ -528,6 +564,18 @@ final class FlightDataModel: NSObject, ObservableObject {
             // fix, once rolling, starts the track afresh.
             trackDeg = headingDeg
             trackAnchorDeg = nil
+        }
+    }
+
+    /// Publish the plane-mode estimator's outputs.
+    private func applyPlaneEstimate() {
+        rollDeg = planeEstimator.rollDeg
+        pitchDeg = planeEstimator.pitchDeg
+        trackDeg = planeEstimator.trackDeg
+        headingDeg = trackDeg
+        if planeEstimator.hasAltitude {
+            altitudeFt = planeEstimator.altitudeFt
+            verticalSpeedFpm = planeEstimator.verticalSpeedFpm
         }
     }
 
@@ -567,7 +615,8 @@ final class FlightDataModel: NSObject, ObservableObject {
         let pull = min(1, dt * Self.anchorPullRate)
         let moving = groundSpeedKts > 3
 
-        if moving, let anchor = trackAnchorDeg {
+        // In plane mode the estimator carries track and altitude.
+        if !isFlightMode, moving, let anchor = trackAnchorDeg {
             let yaw = headingRateDegPerSec * dt
             trackDeg = normalizedHeading(trackDeg + yaw)
             let carried = normalizedHeading(anchor + yaw)
@@ -592,7 +641,7 @@ final class FlightDataModel: NSObject, ObservableObject {
             fixAnchor = anchor
         }
 
-        if let anchor = altitudeAnchorFt {
+        if !isFlightMode, let anchor = altitudeAnchorFt {
             let climb = verticalSpeedFpm / 60 * dt
             altitudeFt += climb
             let carried = anchor + climb
@@ -652,7 +701,14 @@ final class FlightDataModel: NSObject, ObservableObject {
             }
         }
 
-        if loc.course >= 0, loc.speed * Self.mpsToKts > 3 {
+        let now = Date().timeIntervalSinceReferenceDate
+        let fixTime = loc.timestamp.timeIntervalSinceReferenceDate
+        if isFlightMode {
+            if loc.course >= 0, loc.speed >= 0 {
+                planeEstimator.gpsCourse(loc.course, accuracyDeg: loc.courseAccuracy,
+                                         speedKts: loc.speed * Self.mpsToKts, time: fixTime)
+            }
+        } else if loc.course >= 0, loc.speed * Self.mpsToKts > 3 {
             // The first course after standing still starts the track outright;
             // after that the gyro carries it and each fix only anchors it.
             if trackAnchorDeg == nil { trackDeg = loc.course }
@@ -680,13 +736,23 @@ final class FlightDataModel: NSObject, ObservableObject {
                 selectedAltitudeFt = ((feet / 1_000).rounded(.down) + 1) * 1_000
             }
 
+            // Plane mode: altitude and climb rate from the estimator's
+            // alpha-beta filter on GPS altitude — never the barometer,
+            // which reads cabin pressure.
+            if isFlightMode {
+                planeEstimator.gpsAltitude(feet: feet, accuracyFt: loc.verticalAccuracy * Self.metersToFt,
+                                           time: fixTime, now: now)
+            }
+
             // GPS-derived climb rate, for devices without a barometer only.
             // Differenced from the raw fixes — differencing the smoothed
             // altitude would stack a second lag on top.
-            if let last = lastAltitudeSample {
+            if isFlightMode {
+                lastAltitudeSample = nil
+            } else if let last = lastAltitudeSample {
                 let dt = loc.timestamp.timeIntervalSince(last.date)
                 if dt > 0.5 {
-                    if !hasBarometer || isFlightMode {
+                    if !hasBarometer {
                         let fpm = (feet - last.feet) / dt * 60
                         verticalSpeedTargetFpm += (fpm - verticalSpeedTargetFpm) * 0.4
                     }
@@ -701,8 +767,13 @@ final class FlightDataModel: NSObject, ObservableObject {
         // display, stepped once per fix.
         if lastMotionDate.map({ Date().timeIntervalSince($0) > 1 }) ?? true {
             stepSpeedDynamics(deltaTime: 1)
-            if let anchor = trackAnchorDeg { trackDeg = anchor }
-            if let anchor = altitudeAnchorFt { altitudeFt = anchor }
+            if isFlightMode {
+                planeEstimator.step(dt: 1, time: now, motion: nil, groundSpeedKts: groundSpeedKts)
+                applyPlaneEstimate()
+            } else {
+                if let anchor = trackAnchorDeg { trackDeg = anchor }
+                if let anchor = altitudeAnchorFt { altitudeFt = anchor }
+            }
             displayCoordinate = fixAnchor
             publishLocation()
         }
