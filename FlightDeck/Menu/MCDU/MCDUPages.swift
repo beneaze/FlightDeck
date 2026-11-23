@@ -267,7 +267,19 @@ extension MCDUController {
         } else {
             offline = data("----", .white)
         }
-        set(&rows, 4, labelRight: label("OFFLINE DATA"), right: offline)
+        // INIT REQUEST: the plan from SimBrief, as the real unit requests it
+        // from the airline. Typed into the scratchpad first, the SimBrief
+        // username is stored instead.
+        let request: [MCDURun]
+        if isRequestingPlan {
+            request = data("REQUESTING", .white, small: true)
+        } else if simBriefUser == nil {
+            request = boxes(8)
+        } else {
+            request = prompt(style.isBoeing ? "<RTE REQUEST" : "<INIT REQUEST")
+        }
+        set(&rows, 4, labelLeft: label(simBriefUser == nil ? "SIMBRIEF USER" : "SIMBRIEF"),
+            labelRight: label("OFFLINE DATA"), left: request, right: offline)
 
         let active = routePlanner.flightPlan
         let six: [MCDURun]
@@ -336,6 +348,16 @@ extension MCDUController {
             guard (50...430).contains(level) else { return flash("ENTRY OUT OF RANGE") }
             cruiseLevel = level
             refreshPlan()
+        case (true, 4):
+            if isClearCommand {
+                clearScratchpad()
+                simBriefUser = nil
+            } else if let entry = takeEntry() {
+                simBriefUser = entry
+                requestSimBriefPlan()
+            } else {
+                requestSimBriefPlan()
+            }
         case (false, 4):
             if packs.progress == nil, draftPlan != nil { download() }
         case (true, 5):

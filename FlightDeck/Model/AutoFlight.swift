@@ -31,6 +31,9 @@ struct AutoFlight: Equatable {
     var approachArmed = false
     /// Airbus EFIS panel LS: show the approach scales whatever the phase.
     var landingSystem = false
+    /// Terrain on the ND: the Airbus EFIS panel's TERR ON ND pushbutton,
+    /// the Boeing EFIS control panel's TERR switch.
+    var terrainOnND = true
 
     /// The ALT knob's step, the Airbus 100 / 1000 selector.
     var altitudeStepFt: Double = 1_000

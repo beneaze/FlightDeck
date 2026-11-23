@@ -174,6 +174,18 @@ For passengers: on the MCDU's MENU page choose **PLANE**, then open the INIT (A3
    without internet, choose the two airports from the built-in list
    (OurAirports, public domain, about 3,300 airports), by ICAO code
    (`LGZA/EDDM`; IATA codes work too): the route is then a great circle.
+   **The whole route from SimBrief:** real filed ATC routes are only sold
+   by paid services (FlightAware and the like). The free stand-in is a plan
+   you generate in [SimBrief](https://www.simbrief.com) (real-world route
+   data, SID/STAR, levels): type your SimBrief username into the scratchpad
+   and press the key beside SIMBRIEF on INIT (A320 `<INIT REQUEST`, 737
+   `<RTE REQUEST`). The latest plan fills airports, runways, cruise level
+   and every waypoint; its SID and STAR become the real procedures where the
+   procedure data has them, and the ILS to the planned runway is picked.
+   The username is stored; CLR on the line forgets it. *Licensing:* Navigraph's
+   developer terms limit the SimBrief API to flight-simulation use and ask
+   distributed apps for a client ID; settle this with Navigraph before an
+   App Store release.
 2. **Or build the flight plan yourself**, as on the real units. On F-PLN (A320) /
    RTE LEGS (737):
    - Type a waypoint into the scratchpad and press the line-select key of the
@@ -330,6 +342,7 @@ FlightDeck/
 │   ├── NavDatabase.swift        Bundled runways and navaids, waypoint entry parsing
 │   ├── ProcedureDatabase.swift  SIDs, STARs, approaches: FAA US data + imported X-Plane CIFP
 │   ├── XPlaneNavData.swift      Import and reading of the user's X-Plane CIFP / fix / nav files
+│   ├── SimBriefImport.swift     INIT REQUEST: the user's latest SimBrief plan
 │   ├── AutoFlight.swift         FCU / MCP state: targets, modes, FD, AP, approach
 │   ├── AircraftProfile.swift    Per-aircraft envelope and tape scales (A320, B737)
 │   ├── DisplayStyle.swift       Which flight deck the displays imitate

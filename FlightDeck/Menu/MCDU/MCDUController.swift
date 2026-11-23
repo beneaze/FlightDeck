@@ -58,6 +58,85 @@ final class MCDUController: ObservableObject {
     @Published var selected: (name: String, coordinate: CLLocationCoordinate2D)?
     @Published var isShowingMap = false
 
+    // MARK: SimBrief
+
+    /// The user's SimBrief username, for INIT REQUEST.
+    @Published var simBriefUser: String? = UserDefaults.standard.string(forKey: "simBriefUser") {
+        didSet { UserDefaults.standard.set(simBriefUser, forKey: "simBriefUser") }
+    }
+    @Published private(set) var isRequestingPlan = false
+
+    /// INIT REQUEST: load the latest SimBrief plan into the setup.
+    func requestSimBriefPlan() {
+        guard let user = simBriefUser else { return flash("ENTER SIMBRIEF USER") }
+        guard !isRequestingPlan else { return }
+        isRequestingPlan = true
+        Task {
+            defer { isRequestingPlan = false }
+            do {
+                apply(try await SimBriefPlan.fetch(username: user))
+            } catch {
+                flash((error as? SimBriefPlan.FetchError)?.errorDescription ?? "SIMBRIEF NOT AVAIL", amber: true)
+            }
+        }
+    }
+
+    /// Fill the setup from a SimBrief plan: airports, runways, cruise level,
+    /// the route's waypoints, and its SID and STAR where the procedure data
+    /// has them — otherwise their fixes stay in the plan as waypoints.
+    func apply(_ ofp: SimBriefPlan) {
+        let airports = AirportDatabase.shared
+        guard let from = airports.airport(code: ofp.origin), let to = airports.airport(code: ofp.destination) else {
+            return flash("NOT IN DATA BASE", amber: true)
+        }
+        lookup = nil
+        flightNumber = ofp.flightNumber
+        setAirports(origin: from, destination: to)
+        departureRunway = ofp.departureRunway.flatMap { NavDatabase.shared.runway($0, at: from) }
+        approachRunway = ofp.arrivalRunway.flatMap { NavDatabase.shared.runway($0, at: to) }
+        if let feet = ofp.cruiseAltitudeFt, (5_000...43_000).contains(feet) {
+            cruiseLevel = Int((feet / 100).rounded())
+        }
+
+        var waypoints = ofp.fixes
+        let departures = procedures(at: from)
+        if let sid = ofp.sidName, let transitions = departures.sids[sid],
+           departures.sids(from: departureRunway).contains(sid) {
+            sidName = sid
+            let fixes = ofp.fixes.filter { $0.isProcedure && $0.via == sid }
+            // An enroute transition is named after the fix it ends at.
+            if let last = fixes.last?.ident, TerminalProcedures.enrouteTransitions(transitions).contains(last) {
+                sidTransition = last
+            }
+            waypoints.removeAll { $0.isProcedure && $0.via == sid }
+        }
+        let arrivals = procedures(at: to)
+        if let star = ofp.starName, let transitions = arrivals.stars[star] {
+            starName = star
+            let fixes = ofp.fixes.filter { $0.isProcedure && $0.via == star }
+            if let first = fixes.first?.ident, TerminalProcedures.enrouteTransitions(transitions).contains(first) {
+                starTransition = first
+            }
+            waypoints.removeAll { $0.isProcedure && $0.via == star }
+        }
+        // SimBrief names no approach: take the ILS (else the first) to the
+        // planned runway, as a crew would brief it.
+        if let runway = approachRunway {
+            let onRunway = arrivals.approaches.keys.filter {
+                ProcedureDatabase.approachRunway($0).map(Runway.designator) == runway.designator
+            }.sorted()
+            if let approach = onRunway.first(where: { $0.hasPrefix("I") }) ?? onRunway.first {
+                approachName = approach
+            }
+        }
+        enroute = waypoints.map {
+            FlightPlan.Fix(ident: $0.ident, coordinate: .init(latitude: $0.latitude, longitude: $0.longitude),
+                           kind: .enroute)
+        }
+        refreshPlan()
+        flash("SIMBRIEF PLAN LOADED")
+    }
+
     // MARK: X-Plane navigation data
 
     @Published var isShowingImporter = false
