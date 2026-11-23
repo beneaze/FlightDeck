@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import CoreMotion
 import CoreLocation
 import Combine
@@ -249,6 +250,8 @@ final class FlightDataModel: NSObject, ObservableObject {
     private var speedSmoother = Smoother(timeConstant: 0.8)
     private var trendSlew = SlewLimiter(maxRate: 10)
     private var lastMotionTimestamp: TimeInterval?
+    /// The interface's up direction for plane mode, looked up twice a second.
+    private var screenUp: (direction: simd_double3?, timestamp: TimeInterval)?
     /// The interval of the latest motion step, for filters run alongside it.
     private var lastMotionStepInterval: Double?
     private var lastMotionDate: Date?
@@ -463,6 +466,10 @@ final class FlightDataModel: NSObject, ObservableObject {
             let turnRate = simd_dot(rotationRate, g) * 180 / .pi
             _ = turnRateSmoother.step(toward: turnRate, deltaTime: dt)
             if isFlightMode {
+                if screenUp.map({ dm.timestamp - $0.timestamp > 0.5 || dm.timestamp < $0.timestamp }) ?? true {
+                    screenUp = (Self.screenUpDirection(), dm.timestamp)
+                }
+                planeEstimator.screenUp(screenUp?.direction)
                 planeEstimator.step(
                     dt: dt, time: Date().timeIntervalSinceReferenceDate,
                     motion: .init(rotationRate: rotationRate, gravity: g, userAcceleration: acceleration),
@@ -499,6 +506,25 @@ final class FlightDataModel: NSObject, ObservableObject {
             }
         }
         updateHeading()
+    }
+
+    /// The direction the interface shows as up, in Core Motion's device
+    /// coordinates (x right, y toward the top edge in portrait). Plane mode
+    /// takes it for the nose until it has learnt the phone's yaw: a passenger
+    /// reading a phone lying flat on the tray has the screen's up ahead.
+    private static func screenUpDirection() -> simd_double3? {
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        switch scene?.effectiveGeometry.interfaceOrientation {
+        case .portrait: return simd_double3(0, 1, 0)
+        case .portraitUpsideDown: return simd_double3(0, -1, 0)
+        // Home button (or its place) on the left: the top edge points right.
+        case .landscapeLeft: return simd_double3(-1, 0, 0)
+        // Home button on the right: the top edge points left.
+        case .landscapeRight: return simd_double3(1, 0, 0)
+        default: return nil
+        }
     }
 
     /// Pitch and roll from the gravity vector — 0° when the phone is exactly

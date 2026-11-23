@@ -12,15 +12,17 @@ import simd
 ///   the phone sits in the cabin (the mount), and that never changes while
 ///   the phone rests on the tray table, wedged or mounted.
 /// - The gyroscope sees the aircraft's rotation directly, cleanly and fast,
-///   as long as the phone is fixed relative to the cabin.
+///   as long as the phone is fixed relative to the cabin. Turbulence is real
+///   aircraft motion and the gyro sees it as such.
 /// - GPS gives ground track, ground speed and altitude about once a second,
 ///   without drift but with noise and some latency.
 /// - The barometer reads cabin pressure and the magnetometer sits among metal
 ///   and wiring: neither is used here.
 ///
-/// So the estimator integrates the gyro (mapped into aircraft axes through the
-/// mount) for every fast change, and corrects its slow drift toward
-/// physically derived references:
+/// So the gyro, mapped into aircraft axes through the mount, *is* the
+/// attitude: it is integrated at full weight, without rate limits, and the
+/// display shows it after 0.05 s of smoothing. Only its slow drift is
+/// corrected, over tens of seconds, toward physically derived references:
 ///
 /// - Roll toward the coordinated-turn bank `atan(V·ψ̇/g)`.
 /// - Pitch toward the flight-path angle plus a typical angle of attack.
@@ -28,8 +30,19 @@ import simd
 ///   carrying it between fixes and its bias learnt from GPS.
 ///
 /// The corrections are lag-matched (the estimate is passed through the same
-/// low-pass as the reference before the two are compared), so the reference
-/// filtering that rejects turbulence does not drag a roll-in back.
+/// low-pass as the reference before the two are compared), so a correct
+/// reference never pulls on a correct estimate however fast it moves.
+///
+/// The mount is the plumb line (which way is down for the phone) *and* the
+/// phone's yaw on the tray: which horizontal direction of the phone points at
+/// the nose. A phone lying 30° askew turns 50 % of every roll into pitch if
+/// that yaw is wrong, so it is learnt, from the take-off roll and braking
+/// (the specific force along GPS acceleration) and in flight (roll activity
+/// far exceeds pitch activity, and a roll to the right is followed by a right
+/// turn). Until then the screen's up as the passenger reads it (lying flat —
+/// the top edge in portrait) or the phone's back (standing) is taken to point
+/// at the nose. A phone that is picked up and set down again keeps its yaw:
+/// the gyro follows it in the hand.
 ///
 /// Pure Swift on simd, no Core Motion or Core Location types, so the offline
 /// harness in `Tools/PlaneModeHarness` compiles this very file.
@@ -45,6 +58,18 @@ struct PlaneModeEstimator {
         var userAcceleration: simd_double3
     }
 
+    /// Where the phone's yaw on the tray currently comes from.
+    enum YawSource: String {
+        /// Screen up (flat) or back (upright) toward the nose.
+        case assumed
+        /// Carried across a pick-up by integrating the phone's own rotation.
+        case carried
+        /// The dominant roll axis in flight.
+        case flight
+        /// Specific force along the GPS acceleration on the ground.
+        case ground
+    }
+
     /// Every constant, with the physics behind it.
     enum Tuning {
         // Ground / air dynamics, by ground speed with hysteresis.
@@ -53,39 +78,108 @@ struct PlaneModeEstimator {
         /// Below this an aircraft cannot turn: heading holds.
         static let stoppedBelowKts = 3.0
 
-        // Airliner envelope.
+        // Airliner envelope (track limits and sanity clamps only — the gyro
+        // attitude itself is never rate limited).
         static let maxBankDeg = 35.0
-        static let maxRollRateDegPerSec = 8.0      // normal ops ≲ 5–7 °/s
-        static let maxPitchRateDegPerSec = 4.0     // rotation ≈ 3 °/s
         static let minAirTurnRateDegPerSec = 3.0   // rate one
         static let maxAirTurnRateDegPerSec = 6.0   // 35° bank at approach speed
         static let maxGroundTurnRateDegPerSec = 25.0   // taxi turns 10–20 °/s
 
-        // Phone handling: rotation no airliner makes.
-        static let handlingRateAirDegPerSec = 15.0
-        static let handlingRateGroundDegPerSec = 35.0
+        // Phone handling: rotation no airliner makes. Moderate turbulence
+        // peaks around 10–15 °/s for a fraction of a second; a hand picking
+        // up a phone turns it at 50–200 °/s. Turbulence must never count.
+        static let handlingRateAirDegPerSec = 25.0
+        static let handlingRateGroundDegPerSec = 40.0
+        /// The rate must stay above the limit this long.
+        static let handlingSustainTime = 0.2
+        /// Rotation far beyond anything an airliner does counts at once.
+        static let handlingFastRateAirDegPerSec = 60.0
+        static let handlingFastRateGroundDegPerSec = 90.0
+        static let handlingFastSustainTime = 0.05
+        /// …measured on the rate magnitude low-passed this much.
+        static let handlingRateFilterTime = 0.1
+        /// The plumb line leaving the mount by this much (slow pick-ups).
         static let handlingTiltDeg = 30.0
+        /// Sideways, once the yaw is known (coordinated flight has none).
         static let handlingLateralDeg = 12.0
-        static let settleRateDegPerSec = 5.0
+        /// On detection, attitude goes back to before the pick-up — to where
+        /// the rotation rose above handlingStartRate, at least
+        /// handlingRewindTime and at most handlingRewindMax ago — and the
+        /// phone's rotation since then is replayed for the carried yaw.
+        static let handlingRewindTime = 0.3
+        static let handlingRewindMax = 1.0
+        static let handlingStartRateDegPerSec = 10.0
+        /// At rest again: slow rotation and a steady plumb line for this long.
+        static let settleRateDegPerSec = 10.0
+        static let settleTiltDeg = 3.0
         static let settleTime = 1.5
-
-        /// Gyro trust falls from 1 to 0 as the short-term scatter of the
-        /// rotation rate grows from 3 to 8 °/s (handheld phone, tray wobble).
-        static let trustFullBelowDegPerSec = 3.0
-        static let trustZeroAboveDegPerSec = 8.0
+        /// After a handling episode the attitude is whatever the references
+        /// coasted to; the coasting gains fade out over this long.
+        static let recoveryTime = 15.0
 
         // Lag-matched complementary filters. Roll: the reference passes two
         // first-order stages of τ each (turbulent yaw rate at 0.5 Hz is cut
-        // to ~1/50), the estimate the same two before they are compared;
-        // loop s(1+τs)² + K is well damped. Pitch: one stage,
-        // ζ = 1/(2√(K·τ)) ≈ 0.6.
+        // to ~1/50), the estimate the same two before they are compared.
+        // Gains are small — they only remove gyro drift (a residual bias of
+        // 0.05 °/s leaves bias/K ≈ 0.5° in roll) — and smaller still in turns,
+        // where the coordinated-turn bank is off by the wind (it uses ground
+        // speed for airspeed).
         static let rollReferenceLag = 1.2          // τ per stage, s
-        static let rollGain = 0.35                 // K, 1/s
+        static let rollGainStraight = 0.1          // K, 1/s
+        static let rollGainTurning = 0.03
+        /// Turn rate at which the roll gain is halfway down, deg/s.
+        static let rollGainTurnRate = 0.5
+        static let groundRollGain = 0.1
+        /// Pitch: the flight path lags the pitch attitude by seconds (aircraft
+        /// dynamics plus the GPS climb-rate filter), so a light touch.
         static let pitchReferenceLag = 2.5
-        static let pitchGain = 0.3
-        static let rateFilterTime = 0.08           // gyro pre-filter, s
-        static let rollDisplayTime = 0.15
-        static let pitchDisplayTime = 0.25
+        static let pitchGain = 0.03
+        static let groundPitchGain = 0.1
+        /// Without the gyro (handled, or no motion stream) the attitude coasts
+        /// on the references alone, faster.
+        static let coastRollGain = 0.35
+        static let coastPitchGain = 0.3
+        /// Display smoothing, s: the gyro attitude shows within a frame or two.
+        static let displayTime = 0.05
+        /// A changed yaw re-projects the attitude; the difference fades from
+        /// the display over this long instead of jumping.
+        static let reprojectionDisplayTime = 1.0
+
+        // Yaw learning, (a) ground: during the take-off roll and braking the
+        // phone feels the acceleration along the nose.
+        static let groundYawMinSpeedKts = 4.0      // no pushback
+        static let groundYawMinAccelKtsPerSec = 0.8
+        static let groundYawMaxTurnDegPerSec = 3.0
+        /// Speed change that must have been seen, kt.
+        static let groundYawEvidenceKts = 12.0
+        /// Coherence |Σ f·a| / Σ |f|·|a| needed.
+        static let groundYawCoherence = 0.9
+
+        // (b) flight: principal axis of the horizontal rotation rates.
+        static let flightYawWindow = 300.0         // s, exponential forgetting
+        static let flightYawHighPass = 5.0         // s, drops the q = ψ̇·sinφ of turns
+        static let flightYawMinTime = 20.0         // s of data at least
+        /// λ₁, deg²/s: one 25° roll-in at 5°/s gives ~80 after the
+        /// high-pass, a minute of light turbulence a few hundred.
+        static let flightYawMinEnergy = 50.0
+        static let flightYawMaxAnisotropy = 0.4    // λ₂/λ₁
+        /// Nose vs tail: Σ bank·ψ̇ along the axis, deg²/s. A 25° turn at
+        /// 450 kt gives ~900, turbulence noise ~20.
+        static let flightYawBankLeak = 60.0        // s
+        static let flightYawSignEvidence = 100.0
+        /// A flight estimate overrides a ground one only when this far off
+        /// and clearly anisotropic (the phone slid without being noticed).
+        static let flightOverridesGroundDeg = 20.0
+        static let flightOverrideAnisotropy = 0.15
+        /// Hysteresis: a new yaw is applied only when it differs by more —
+        /// by less when it comes from a better source than the current one.
+        static let yawApplyDeg = 2.0
+        static let yawUpgradeDeg = 0.5
+        /// Samples reach the yaw learners this late, so the first moments of
+        /// a pick-up (before it is detected) are dropped, never learnt.
+        static let yawLearningDelay = 0.5
+        /// Rotation this fast is never learnt from, handling or not.
+        static let yawLearningMaxRateDegPerSec = 20.0
 
         /// Typical body angle of attack: ~6° at approach and climb-out
         /// speeds, ~2.5° in cruise.
@@ -133,16 +227,30 @@ struct PlaneModeEstimator {
     private(set) var isHandling = false
     private(set) var isAirborne = false
     private(set) var isGroundDynamics = true
+    /// 1 while the gyro drives the attitude, 0 while the phone is handled or
+    /// no motion stream arrives.
     private(set) var gyroTrust = 1.0
     private(set) var yawBiasDegPerSec = 0.0
-    /// Device → cabin rotation: cabin down is (0, -1, 0), the nose (0, 0, -1).
+    /// Device → cabin rotation: cabin right is (1, 0, 0), down (0, -1, 0),
+    /// the nose (0, 0, -1). Includes the learnt yaw.
     private(set) var mount: simd_double3x3?
+    private(set) var yawSource = YawSource.assumed
+    /// How far the assumed direction (screen up flat, back upright) points
+    /// right of the learnt nose, deg — the phone's yaw on the tray.
+    private(set) var phoneYawDeg = 0.0
 
     // MARK: State
 
     // Mount.
     private var mountDown: simd_double3?
     private var fastDown: simd_double3?
+    private var slowDown: simd_double3?
+    /// Device → level-mount rotation (down aligned, yaw not applied).
+    private var level = matrix_identity_double3x3
+    /// The nose in device coordinates (only its horizontal part counts).
+    private var noseDevice: simd_double3?
+    /// The top-edge / back assumption in device coordinates.
+    private var defaultNoseDevice = simd_double3(0, 0, -1)
     /// The aircraft's pitch inside the mount frame. The mount is learnt from
     /// the plumb line, which in steady flight hangs along the earth vertical,
     /// so the mount frame is level at whatever pitch the aircraft flew
@@ -154,13 +262,52 @@ struct PlaneModeEstimator {
     /// this long (a running mean) up to a minute, then forgets slowly.
     private var mountAge = 0.0
     private var isAttitudeSeeded = false
-    private var settleTimer = 0.0
-    private var rateMean = simd_double3(repeating: 0)
-    private var rateMeanSquare = 0.0
     private var bodyRates = simd_double3(repeating: 0)     // p, q, r — rad/s
+
+    // Handling.
+    private var rateLevel = 0.0                            // |ω| low-passed, deg/s
+    private var overRateTime = 0.0
+    private var fastRateTime = 0.0
+    /// The direction the interface shows as up, device coordinates.
+    private var screenUpDevice: simd_double3?
+    private var settleTimer = 0.0
+    /// Current device → device-at-pick-up rotation, integrated from the gyro.
+    private var handlingRotation = matrix_identity_double3x3
+    private var handlingStartTrack = 0.0
+    private var handlingStartDown = simd_double3(0, -1, 0)
+    private var recoveryTimer = 0.0
+    /// Recent rotation rates (device, rad/s) and attitude, for the rewind.
+    private var recent: [Recent] = []
+    private struct Recent {
+        var time: Double, rate: simd_double3, dt: Double
+        var roll: Double, pitch: Double, turnRateStage: Double, turnRateReference: Double, track: Double
+    }
+
+    /// Motion samples waiting for the yaw learners.
+    private var yawQueue: [YawSample] = []
+    private struct YawSample {
+        var time: Double, dt: Double
+        var rate: simd_double3                             // device, rad/s
+        var force: simd_double3                            // device, g (gravity + user)
+        var groundSpeedKts: Double, groundAcceleration: Double
+        var pitch: Double, isAirborne: Bool
+    }
+
+    // Yaw learning.
+    private var forceBias = simd_double2(0, 0)            // g, level mount (x, z)
+    private var forceFiltered = simd_double2(0, 0)
+    private var groundSum = simd_double2(0, 0)
+    private var groundEvidence = 0.0
+    private var groundSpeedChange = 0.0
+    private var rateSlow = simd_double2(0, 0)             // deg/s, level mount (x, z)
+    private var covXX = 0.0, covXZ = 0.0, covZZ = 0.0
+    private var bankVector = simd_double2(0, 0)           // deg
+    private var signVector = simd_double2(0, 0)           // deg²/s
+    private var flightLearnTime = 0.0
 
     // Attitude.
     private var roll = 0.0, pitch = 0.0                    // estimates, deg
+    private var rollOffset = 0.0, pitchOffset = 0.0        // re-projection, fading
     private var turnRateStage = 0.0, turnRateReference = 0.0   // deg/s, low-passed twice
     private var rollReference = 0.0
     private var rollStage = 0.0, rollLagged = 0.0
@@ -210,8 +357,27 @@ struct PlaneModeEstimator {
         hasAltitude = true
     }
 
+    /// The direction, in device coordinates, that the interface currently
+    /// shows as up: (0, 1, 0) in portrait, (±1, 0, 0) in landscape. A
+    /// passenger reading a phone that lies flat has it toward the nose, so
+    /// until a yaw is learnt it is the better guess than the top edge. Nil
+    /// when unknown.
+    mutating func screenUp(_ up: simd_double3?) {
+        guard up != screenUpDevice else { return }
+        screenUpDevice = up
+        guard mountDown != nil, !isHandling else { return }
+        defaultNoseDevice = assumedNose()
+        if yawSource == .assumed {
+            let n = level * defaultNoseDevice
+            if horizontalLength(n) > 0.3 { adoptNose(simd_normalize(simd_double2(n.x, n.z)), source: .assumed) }
+        } else {
+            updateMount()
+        }
+    }
+
     /// Forget the mount: the next motion sample sets it afresh — for when
-    /// the crew captures a new attitude zero.
+    /// the crew captures a new attitude zero. A learnt yaw survives if the
+    /// phone still lies roughly the same way.
     mutating func reanchorMount() {
         mountDown = nil
         mount = nil
@@ -226,7 +392,7 @@ struct PlaneModeEstimator {
         stepAltitude(dt: dt)
 
         if let motion {
-            processMotion(motion, dt: dt)
+            processMotion(motion, dt: dt, groundSpeedKts: gs)
         } else {
             gyroTrust = 0
             bodyRates = .zero
@@ -360,9 +526,9 @@ struct PlaneModeEstimator {
         }
     }
 
-    // MARK: - Mount, handling, gyro trust
+    // MARK: - Mount and handling
 
-    private mutating func processMotion(_ m: Motion, dt: Double) {
+    private mutating func processMotion(_ m: Motion, dt: Double, groundSpeedKts gs: Double) {
         let apparent = m.gravity + m.userAcceleration
         // In the air the plumb line (apparent gravity) is the cabin's own
         // down, turns included. On the ground taxi accelerations swing it,
@@ -370,76 +536,330 @@ struct PlaneModeEstimator {
         let observed = !isGroundDynamics && simd_length(apparent) > 0.3
             ? simd_normalize(apparent) : simd_normalize(m.gravity)
 
-        guard mountDown != nil, mount != nil else {
-            mountDown = observed
-            fastDown = observed
-            mount = Self.minimalRotation(from: observed, to: simd_double3(0, -1, 0))
-            mountPitchDeg = pitch
-            mountAge = 0
-            bodyRates = .zero
-            gyroTrust = 0
+        guard let currentDown = mountDown, mount != nil else {
+            anchorMount(down: observed)
             return
         }
         fastDown = simd_normalize(lowPass(fastDown ?? observed, observed, dt: dt, time: 0.3))
+        slowDown = simd_normalize(lowPass(slowDown ?? observed, fastDown ?? observed, dt: dt, time: 1.0))
 
-        let rateDeg = m.rotationRate * 180 / .pi
-        let speed = simd_length(rateDeg)
-        rateMean = lowPass(rateMean, rateDeg, dt: dt, time: 1.5)
-        rateMeanSquare = lowPass(rateMeanSquare, simd_length_squared(rateDeg), dt: dt, time: 1.5)
-        let scatter = max(0, rateMeanSquare - simd_length_squared(rateMean)).squareRoot()
+        let speed = simd_length(m.rotationRate) * 180 / .pi
+        rateLevel = lowPass(rateLevel, speed, dt: dt, time: Tuning.handlingRateFilterTime)
+        recent.append(Recent(time: clock, rate: m.rotationRate, dt: dt, roll: roll, pitch: pitch,
+                             turnRateStage: turnRateStage, turnRateReference: turnRateReference,
+                             track: track))
+        while let first = recent.first, clock - first.time > Tuning.handlingRewindMax + 0.1 {
+            recent.removeFirst()
+        }
 
         // Detect the phone being picked up, turned or set down elsewhere.
         if !isHandling, let mount, let fastDown {
+            let limit = isGroundDynamics ? Tuning.handlingRateGroundDegPerSec
+                                         : Tuning.handlingRateAirDegPerSec
+            overRateTime = rateLevel > limit ? overRateTime + dt : 0
+            let fastLimit = isGroundDynamics ? Tuning.handlingFastRateGroundDegPerSec
+                                             : Tuning.handlingFastRateAirDegPerSec
+            fastRateTime = speed > fastLimit ? fastRateTime + dt : 0
             let down = mount * fastDown
             let tilt = acos(min(1, max(-1, -down.y))) * 180 / .pi
             let lateral = asin(min(1, max(-1, down.x))) * 180 / .pi
-            let limit = isGroundDynamics ? Tuning.handlingRateGroundDegPerSec
-                                         : Tuning.handlingRateAirDegPerSec
-            if speed > limit || tilt > Tuning.handlingTiltDeg
-                || (!isGroundDynamics && abs(lateral) > Tuning.handlingLateralDeg) {
-                isHandling = true
-                settleTimer = 0
+            if overRateTime >= Tuning.handlingSustainTime || fastRateTime >= Tuning.handlingFastSustainTime
+                || tilt > Tuning.handlingTiltDeg
+                || (!isGroundDynamics && yawSource != .assumed
+                    && abs(lateral) > Tuning.handlingLateralDeg) {
+                beginHandling()
             }
         }
         if isHandling {
-            settleTimer = speed < Tuning.settleRateDegPerSec ? settleTimer + dt : 0
+            // Follow the phone's own rotation, so its yaw on the tray can be
+            // carried over to wherever it is set down.
+            handlingRotation = handlingRotation * Self.rotation(m.rotationRate * dt)
+            let steady = angle(fastDown ?? observed, slowDown ?? observed) < Tuning.settleTiltDeg
+            settleTimer = rateLevel < Tuning.settleRateDegPerSec && steady ? settleTimer + dt : 0
             if settleTimer >= Tuning.settleTime, let fastDown {
-                // At rest again: wherever it now sits is the new mount.
-                isHandling = false
-                mountDown = fastDown
-                mountPitchDeg = pitch
-                mountAge = 0
+                endHandling(down: fastDown)
+            } else {
+                gyroTrust = 0
                 bodyRates = .zero
+                return
             }
-        } else if let current = mountDown, abs(groundAcceleration) < 1 {
+        } else if abs(groundAcceleration) < 1 {
             // Learn only while the speed is steady: a takeoff roll's 0.25 g
             // tilts the plumb line 14° aft.
             mountAge += dt
             let learning = min(60, max(1, mountAge))
-            mountDown = simd_normalize(lowPass(current, observed, dt: dt, time: learning))
+            mountDown = simd_normalize(lowPass(currentDown, observed, dt: dt, time: learning))
             mountPitchDeg = lowPass(mountPitchDeg, pitch, dt: dt, time: learning)
         }
-        if let mountDown { mount = Self.minimalRotation(from: mountDown, to: simd_double3(0, -1, 0)) }
-
-        if isHandling {
-            gyroTrust = 0
-            bodyRates = .zero
-            return
-        }
-        gyroTrust = isGroundDynamics ? 1 : min(1, max(0,
-            1 - (scatter - Tuning.trustFullBelowDegPerSec)
-                / (Tuning.trustZeroAboveDegPerSec - Tuning.trustFullBelowDegPerSec)))
+        updateMount()
+        gyroTrust = 1
 
         // Body rates: mount frame x right, y up, z aft, with the body pitched
         // up by mountPitchDeg in it; p about the nose (right wing down +),
         // q about the right wing (nose up +), r about the body's down axis
-        // (nose right +).
+        // (nose right +). No pre-filter: the integration is the filter.
         let w = (mount ?? matrix_identity_double3x3) * m.rotationRate
         let o = mountPitchDeg * .pi / 180
         let nose = simd_double3(0, sin(o), -cos(o))
         let up = simd_double3(0, cos(o), sin(o))
-        let body = simd_double3(simd_dot(w, nose), w.x, -simd_dot(w, up))
-        bodyRates = lowPass(bodyRates, body, dt: dt, time: Tuning.rateFilterTime)
+        bodyRates = simd_double3(simd_dot(w, nose), w.x, -simd_dot(w, up))
+
+        yawQueue.append(YawSample(time: clock, dt: dt, rate: m.rotationRate,
+                                  force: m.gravity + m.userAcceleration, groundSpeedKts: gs,
+                                  groundAcceleration: groundAcceleration, pitch: pitch,
+                                  isAirborne: isAirborne))
+        while let first = yawQueue.first, clock - first.time >= Tuning.yawLearningDelay {
+            yawQueue.removeFirst()
+            learnYaw(first)
+        }
+    }
+
+    /// A fresh mount on `down`. A yaw learnt before is kept if the phone
+    /// still lies roughly the same way, else the top edge / back is assumed.
+    private mutating func anchorMount(down: simd_double3) {
+        mountDown = down
+        fastDown = down
+        slowDown = down
+        level = Self.minimalRotation(from: down, to: simd_double3(0, -1, 0))
+        defaultNoseDevice = assumedNose()
+        if let kept = noseDevice, horizontalLength(level * kept) > 0.7 {
+            yawSource = yawSource == .assumed ? .assumed : .carried
+        } else {
+            noseDevice = defaultNoseDevice
+            yawSource = .assumed
+        }
+        mountPitchDeg = pitch
+        mountAge = 0
+        bodyRates = .zero
+        gyroTrust = 0
+        resetYawLearning()
+        updateMount()
+    }
+
+    private mutating func updateMount() {
+        guard let mountDown else { return }
+        level = Self.minimalRotation(from: mountDown, to: simd_double3(0, -1, 0))
+        let n = horizontalNose()
+        mount = Self.yawRotation(nose: n) * level
+        let reference = level * defaultNoseDevice
+        let r = simd_double2(reference.x, reference.z)
+        phoneYawDeg = horizontalLength(level * defaultNoseDevice) > 0.3
+            ? atan2(r.x * n.y - r.y * n.x, r.x * n.x + r.y * n.y) * -180 / .pi : 0
+    }
+
+    /// The nose as assumed before anything is learnt: lying flat, the
+    /// screen's up as the passenger reads it (the top edge in portrait);
+    /// standing, the phone's back.
+    private func assumedNose() -> simd_double3 {
+        let back = level.transpose * simd_double3(0, 0, -1)
+        let screenNormal = level * simd_double3(0, 0, 1)
+        if let up = screenUpDevice, abs(screenNormal.y) > 0.7, horizontalLength(level * up) > 0.5 {
+            return up
+        }
+        return back
+    }
+
+    /// The applied nose in the level mount frame as (x, z), unit length.
+    private func horizontalNose() -> simd_double2 {
+        let n = level * (noseDevice ?? defaultNoseDevice)
+        let h = simd_double2(n.x, n.z)
+        return simd_length(h) > 1e-6 ? simd_normalize(h) : simd_double2(0, -1)
+    }
+
+    private mutating func beginHandling() {
+        isHandling = true
+        settleTimer = 0
+        overRateTime = 0
+        fastRateTime = 0
+        handlingStartDown = mountDown ?? simd_double3(0, -1, 0)
+        // The detection came late: go back to the attitude from before the
+        // pick-up and replay the phone's rotation since then.
+        handlingRotation = matrix_identity_double3x3
+        yawQueue.removeAll()
+        var start = recent.count - 1
+        while start > 0 {
+            let earlier = recent[start - 1]
+            let age = clock - earlier.time
+            if age > Tuning.handlingRewindMax { break }
+            if age > Tuning.handlingRewindTime,
+               simd_length(earlier.rate) * 180 / .pi < Tuning.handlingStartRateDegPerSec { break }
+            start -= 1
+        }
+        if start >= 0, start < recent.count {
+            let first = recent[start]
+            roll = first.roll
+            pitch = first.pitch
+            // The phone's own rotation went into the turn rate as well.
+            turnRateStage = first.turnRateStage
+            turnRateReference = first.turnRateReference
+            let delta = first.track - track
+            track += delta
+            for i in history.indices where history[i].time > first.time { history[i].track += delta }
+            // The current sample follows in processMotion.
+            for s in recent where s.time >= first.time && s.time < clock {
+                handlingRotation = handlingRotation * Self.rotation(s.rate * s.dt)
+            }
+        }
+        handlingStartTrack = track
+    }
+
+    private mutating func endHandling(down: simd_double3) {
+        isHandling = false
+        let previousNose = noseDevice ?? defaultNoseDevice
+        // The aircraft turned meanwhile (the gyro saw that too): turn the old
+        // nose with it, about the old down, then into the phone's new frame.
+        let turned = Self.rotation(simd_normalize(handlingStartDown)
+                                   * ((track - handlingStartTrack) * .pi / 180)) * previousNose
+        let carried = handlingRotation.transpose * turned
+        mountDown = down
+        fastDown = down
+        slowDown = down
+        level = Self.minimalRotation(from: down, to: simd_double3(0, -1, 0))
+        defaultNoseDevice = assumedNose()
+        if horizontalLength(level * carried) > 0.5 {
+            noseDevice = carried
+            yawSource = .carried
+        } else {
+            noseDevice = defaultNoseDevice
+            yawSource = .assumed
+        }
+        mountPitchDeg = pitch
+        mountAge = 0
+        bodyRates = .zero
+        recoveryTimer = Tuning.recoveryTime
+        resetYawLearning()
+    }
+
+    // MARK: - Yaw learning
+
+    private mutating func resetYawLearning() {
+        yawQueue.removeAll()
+        forceBias = .zero
+        forceFiltered = .zero
+        groundSum = .zero
+        groundEvidence = 0
+        groundSpeedChange = 0
+        rateSlow = .zero
+        covXX = 0; covXZ = 0; covZZ = 0
+        bankVector = .zero
+        signVector = .zero
+        flightLearnTime = 0
+    }
+
+    private mutating func learnYaw(_ sample: YawSample) {
+        let dt = sample.dt
+        let w = level * sample.rate * 180 / .pi                     // deg/s
+        guard simd_length(w) < Tuning.yawLearningMaxRateDegPerSec else { return }
+        let verticalRate = -w.y - yawBiasDegPerSec                  // nose right +
+        let gs = sample.groundSpeedKts, groundAcceleration = sample.groundAcceleration
+
+        if !sample.isAirborne {
+            // (a) Accelerating, the phone feels a force toward the tail (the
+            // reaction reading); braking, toward the nose. Weighting the
+            // horizontal force by the signed GPS acceleration sums both into
+            // the nose direction, and any sideways (turn) force averages out.
+            let a = level * sample.force
+            let h = simd_double2(a.x, a.z)
+            if abs(groundAcceleration) < 0.3, abs(verticalRate) < 2 {
+                forceBias = lowPass(forceBias, h, dt: dt, time: 3)   // tray tilt residue
+            }
+            // Roughly the lag of the GPS acceleration.
+            forceFiltered = lowPass(forceFiltered, h - forceBias, dt: dt, time: 2)
+            if gs >= Tuning.groundYawMinSpeedKts,
+               abs(groundAcceleration) > Tuning.groundYawMinAccelKtsPerSec,
+               abs(verticalRate) < Tuning.groundYawMaxTurnDegPerSec, abs(sample.pitch) < 3 {
+                groundSum -= forceFiltered * groundAcceleration * dt
+                groundEvidence += simd_length(forceFiltered) * abs(groundAcceleration) * dt
+                groundSpeedChange += abs(groundAcceleration) * dt
+            }
+            if groundSpeedChange > Tuning.groundYawEvidenceKts,
+               simd_length(groundSum) > Tuning.groundYawCoherence * groundEvidence {
+                adoptNose(simd_normalize(groundSum), source: .ground)
+            }
+            return
+        }
+
+        // (b) In flight the aircraft rolls far more than it pitches — in
+        // turns and in turbulence alike — so the dominant horizontal rotation
+        // axis is the longitudinal one. High-passed, so the steady pitch rate
+        // of a turn (q = ψ̇·sinφ) does not count.
+        let rate = simd_double2(w.x, w.z)
+        rateSlow = lowPass(rateSlow, rate, dt: dt, time: Tuning.flightYawHighPass)
+        let hp = rate - rateSlow
+        let decay = exp(-dt / Tuning.flightYawWindow)
+        covXX = covXX * decay + hp.x * hp.x * dt
+        covXZ = covXZ * decay + hp.x * hp.y * dt
+        covZZ = covZZ * decay + hp.y * hp.y * dt
+        // Nose or tail: about the nose, a roll to the right (bank > 0) is
+        // followed by a right turn (ψ̇ > 0). Σ bank·ψ̇ along the axis says
+        // which end is which.
+        bankVector = bankVector * exp(-dt / Tuning.flightYawBankLeak) + rate * dt
+        signVector = signVector * decay + bankVector * verticalRate * dt
+        flightLearnTime += dt
+
+        let mean = (covXX + covZZ) / 2
+        let spread = (((covXX - covZZ) / 2) * ((covXX - covZZ) / 2) + covXZ * covXZ).squareRoot()
+        let major = mean + spread, minor = mean - spread
+        guard flightLearnTime >= Tuning.flightYawMinTime, major > Tuning.flightYawMinEnergy,
+              minor < Tuning.flightYawMaxAnisotropy * major else { return }
+        let beta = 0.5 * atan2(2 * covXZ, covXX - covZZ)
+        var axis = simd_double2(cos(beta), sin(beta))
+        let evidence = simd_dot(axis, signVector)
+        let resolved = abs(evidence) > Tuning.flightYawSignEvidence
+        if resolved {
+            if evidence < 0 { axis = -axis }
+        } else if simd_dot(axis, horizontalNose()) < 0 {
+            axis = -axis                     // the end nearer the current guess
+        }
+        if yawSource == .ground {
+            // The take-off estimate is the better one; only a phone that
+            // clearly slid on the tray overrides it.
+            guard resolved, minor < Tuning.flightOverrideAnisotropy * major,
+                  angleDeg(axis, horizontalNose()) > Tuning.flightOverridesGroundDeg else { return }
+        }
+        adoptNose(axis, source: .flight)
+    }
+
+    /// Apply a learnt nose direction (level mount frame, (x, z)). The
+    /// attitude is re-projected onto the new axes — what was integrated
+    /// through the old ones was the same physical tilt — and the display
+    /// glides over the difference.
+    private mutating func adoptNose(_ nose: simd_double2, source: YawSource) {
+        let old = horizontalNose()
+        let upgrade = rank(source) > rank(yawSource)
+        guard angleDeg(nose, old) > (upgrade ? Tuning.yawUpgradeDeg : Tuning.yawApplyDeg) else {
+            if source == .ground || yawSource != .ground { yawSource = source }
+            return
+        }
+        // Tilt as a horizontal rotation vector: roll about the nose, pitch
+        // (relative to the reference) about the right wing. Right = (−z, x)
+        // in (x, z) for a nose (x, z): up × aft.
+        let rightOld = simd_double2(-old.y, old.x)
+        let rightNew = simd_double2(-nose.y, nose.x)
+        let pitchBase = pitchReference
+        let tilt = roll * old + (pitch - pitchBase) * rightOld
+        let newRoll = simd_dot(tilt, nose)
+        let newPitch = pitchBase + simd_dot(tilt, rightNew)
+        rollOffset += roll - newRoll
+        pitchOffset += pitch - newPitch
+        rollStage += newRoll - roll
+        rollLagged += newRoll - roll
+        pitchLagged += newPitch - pitch
+        roll = newRoll
+        pitch = newPitch
+
+        noseDevice = level.transpose * simd_double3(nose.x, 0, nose.y)
+        yawSource = source
+        updateMount()
+    }
+
+    private func rank(_ source: YawSource) -> Int {
+        switch source {
+        case .assumed: return 0
+        case .carried: return 1
+        case .flight: return 2
+        case .ground: return 3
+        }
     }
 
     // MARK: - Attitude
@@ -489,17 +909,47 @@ struct PlaneModeEstimator {
             pitchDeg = pitchTarget
             mountPitchDeg = pitchTarget
         }
-        let gyroRoll = clamp(phiDot * gyroTrust, Tuning.maxRollRateDegPerSec)
-        let gyroPitch = clamp(thetaDot * gyroTrust, Tuning.maxPitchRateDegPerSec)
-        roll += (gyroRoll + Tuning.rollGain * (rollReference - rollLagged)) * dt
-        pitch += (gyroPitch + Tuning.pitchGain * (pitchReference - pitchLagged)) * dt
-        roll = clamp(roll, 45)
-        pitch = min(25, max(-15, pitch))
 
-        rollDeg = slew(lowPass(rollDeg, roll, dt: dt, time: Tuning.rollDisplayTime),
-                       from: rollDeg, rate: 10, dt: dt)
-        pitchDeg = slew(lowPass(pitchDeg, pitch, dt: dt, time: Tuning.pitchDisplayTime),
-                        from: pitchDeg, rate: 5, dt: dt)
+        let gyro = gyroTrust > 0.5
+        let rollGain: Double
+        let pitchGain: Double
+        if !gyro {
+            rollGain = Tuning.coastRollGain
+            pitchGain = Tuning.coastPitchGain
+        } else if recoveryTimer > 0 {
+            // Just set down: the attitude is what the references coasted to.
+            let f = recoveryTimer / Tuning.recoveryTime
+            rollGain = Tuning.rollGainStraight + (Tuning.coastRollGain - Tuning.rollGainStraight) * f
+            pitchGain = Tuning.pitchGain + (Tuning.coastPitchGain - Tuning.pitchGain) * f
+            recoveryTimer = max(0, recoveryTimer - dt)
+        } else if isAirborne {
+            let x = turnRateReference / Tuning.rollGainTurnRate
+            rollGain = Tuning.rollGainTurning
+                + (Tuning.rollGainStraight - Tuning.rollGainTurning) / (1 + x * x)
+            pitchGain = Tuning.pitchGain
+        } else {
+            rollGain = Tuning.groundRollGain
+            // Fast on the runway the aircraft rotates: the gyro alone, and
+            // the pitch reference waits where the estimate is, so lift-off
+            // starts without a pull.
+            pitchGain = isGroundDynamics ? Tuning.groundPitchGain : 0
+        }
+        if pitchGain == 0 { pitchReference = pitchLagged }
+
+        if gyro {
+            roll += phiDot * dt
+            pitch += thetaDot * dt
+        }
+        roll += rollGain * (rollReference - rollLagged) * dt
+        pitch += pitchGain * (pitchReference - pitchLagged) * dt
+        roll = clamp(roll, 60)
+        pitch = min(30, max(-20, pitch))
+
+        let fade = exp(-dt / Tuning.reprojectionDisplayTime)
+        rollOffset *= fade
+        pitchOffset *= fade
+        rollDeg = lowPass(rollDeg, roll + rollOffset, dt: dt, time: Tuning.displayTime)
+        pitchDeg = lowPass(pitchDeg, pitch + pitchOffset, dt: dt, time: Tuning.displayTime)
     }
 
     // MARK: - Track
@@ -594,6 +1044,28 @@ extension PlaneModeEstimator {
         ])
         return matrix_identity_double3x3 + skew + (1 / (1 + c)) * (skew * skew)
     }
+
+    /// The rotation by the rotation vector `v` (axis × angle, rad).
+    static func rotation(_ v: simd_double3) -> simd_double3x3 {
+        let angle = simd_length(v)
+        guard angle > 1e-12 else { return matrix_identity_double3x3 }
+        let k = v / angle
+        let skew = simd_double3x3(rows: [
+            simd_double3(0, -k.z, k.y),
+            simd_double3(k.z, 0, -k.x),
+            simd_double3(-k.y, k.x, 0),
+        ])
+        return matrix_identity_double3x3 + sin(angle) * skew + (1 - cos(angle)) * (skew * skew)
+    }
+
+    /// Level mount → cabin: the yaw that turns `nose` ((x, z) in the level
+    /// mount frame) onto the cabin nose (0, 0, −1).
+    static func yawRotation(nose n: simd_double2) -> simd_double3x3 {
+        let aft = simd_double3(-n.x, 0, -n.y)
+        let up = simd_double3(0, 1, 0)
+        let right = simd_cross(up, aft)
+        return simd_double3x3(rows: [right, up, aft])
+    }
 }
 
 /// First-order low-pass step, independent of the step rate.
@@ -605,11 +1077,30 @@ private func lowPass(_ value: simd_double3, _ target: simd_double3, dt: Double, 
     value + (target - value) * -expm1(-dt / time)
 }
 
+private func lowPass(_ value: simd_double2, _ target: simd_double2, dt: Double, time: Double) -> simd_double2 {
+    value + (target - value) * -expm1(-dt / time)
+}
+
 private func slew(_ target: Double, from value: Double, rate: Double, dt: Double) -> Double {
     value + clamp(target - value, rate * dt)
 }
 
 private func clamp(_ x: Double, _ limit: Double) -> Double { min(limit, max(-limit, x)) }
+
+/// Angle between two unit vectors, deg.
+private func angle(_ a: simd_double3, _ b: simd_double3) -> Double {
+    acos(min(1, max(-1, simd_dot(a, b)))) * 180 / .pi
+}
+
+private func angleDeg(_ a: simd_double2, _ b: simd_double2) -> Double {
+    acos(min(1, max(-1, simd_dot(simd_normalize(a), simd_normalize(b))))) * 180 / .pi
+}
+
+private func horizontalLength(_ v: simd_double3) -> Double { simd_double2(v.x, v.z).length }
+
+private extension simd_double2 {
+    var length: Double { simd_length(self) }
+}
 
 private func wrap180(_ d: Double) -> Double {
     var d = d.truncatingRemainder(dividingBy: 360)
