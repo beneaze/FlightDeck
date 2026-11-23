@@ -50,7 +50,7 @@ final class MCDUController: ObservableObject {
     private(set) var flightData: FlightDataModel!
     private(set) var packs: FlightPackStore!
     private(set) var speedLimits: SpeedLimitProvider!
-    private let lookupProvider: FlightLookupProvider = FlightArchiveProvider()
+    private let lookupProvider: FlightLookupProvider = DefaultFlightLookup()
 
     /// Put the MCDU away and return to the displays.
     var close: () -> Void = {}
@@ -226,10 +226,10 @@ final class MCDUController: ObservableObject {
                 case .notFound: flash("FLT NOT IN DATA BASE", amber: true)
                 case .offline: flash("NO CONNECTION", amber: true)
                 case .unknownAirport: flash("NOT IN DATA BASE", amber: true)
-                case .unavailable: flash("FLT ARCHIVE NOT AVAIL", amber: true)
+                case .unavailable: flash("ROUTE DATA NOT AVAIL", amber: true)
                 }
             } catch {
-                flash("FLT ARCHIVE NOT AVAIL", amber: true)
+                flash("ROUTE DATA NOT AVAIL", amber: true)
             }
         }
     }

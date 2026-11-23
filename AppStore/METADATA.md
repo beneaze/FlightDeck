@@ -46,7 +46,7 @@ Works in portrait and landscape, on iPhone and iPad, including Split View.
 
 FlightDeck is for entertainment. It is not a navigation aid or a certified instrument. Set it up before you drive, keep your eyes on the road and follow posted signs and traffic laws.
 
-Speed limits © OpenStreetMap contributors (ODbL). Flight tracks contain data from adsb.lol (ODbL). Terrain: AWS Open Data Terrain Tiles. Airports: OurAirports.
+Speed limits © OpenStreetMap contributors (ODbL). Flight routes: adsbdb.com (Virtual Radar Server standing data, CC0) and hexdb.io. Terrain: AWS Open Data Terrain Tiles. Airports: OurAirports.
 
 ## Keywords [100]
 cockpit,pfd,efis,glass cockpit,pilot,aviation,dashboard,speedometer,hud,altimeter,attitude,gps,car
@@ -67,7 +67,7 @@ All answers "None" → 4+.
 - Data collected: **Yes**
 - Location → Precise Location (speed-limit lookup)
 - Location → Coarse Location (terrain tiles for the planned route or flight)
-- Search History (flight numbers looked up in the flight archive)
+- Search History (flight numbers looked up at adsbdb.com and hexdb.io)
 - For each: used for App Functionality, **not** linked to the user, **not** used for tracking.
 - Everything else: not collected.
 

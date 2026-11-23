@@ -139,10 +139,16 @@ For passengers: on the MCDU's MENU page choose **PLANE**, then open the INIT (A3
 1. **Pick the flight.** Type a flight number (`LH400`) into the scratchpad and
    press the line-select key beside FLT NBR. The
    app turns it into the ICAO callsign aircraft transmit (`DLH400`, via a
-   bundled IATA→ICAO airline table from Wikidata, CC0) and fetches that
-   callsign's most recent flown track from the **free flight-track archive**
-   (see below). That gives the departure and arrival airports and the path
-   the flight actually took on an earlier day. When no track is found, or
+   bundled IATA→ICAO airline table from Wikidata, CC0) and asks two free,
+   keyless route APIs at once for that callsign's airports,
+   [adsbdb.com](https://www.adsbdb.com) (Virtual Radar Server's standing data,
+   CC0, compiled from ACARS logs and user reports) and
+   [hexdb.io](https://hexdb.io), taking the first answer. That fills FROM/TO; the path is
+   the great circle, or what you enter on F-PLN. The route belongs to the
+   callsign, so for a codeshare (LH4335, flown by Eurowings Discover) enter
+   the operating flight (4Y1267). If a flight-track archive has been set up
+   (see below, off by default), the path flown on an earlier day is used
+   instead. When no route is found, or
    without internet, choose the two airports from the built-in list
    (OurAirports, public domain, about 3,300 airports), by ICAO code
    (`LGZA/EDDM`; IATA codes work too): the route is then a great circle.
@@ -193,7 +199,10 @@ In the Simulator, the demo flies the active flight plan (launch arguments
 `-demoStartNm 150` start further along it, `-demoTimeScale 10` speeds it up,
 `-simulateOffline YES` makes every download fail to check offline behaviour).
 
-### The free flight-track archive
+### The optional flight-track archive
+
+Off by default: the app uses it only when `FlightArchiveProvider.publishedBaseURL`
+is set (or the `-flightArchiveBaseURL` launch argument).
 
 No free source publishes filed flight plans in a form a distributed app may
 use, so the expected path is the one the flight really flew recently.
@@ -319,7 +328,8 @@ Tools/
 ## Data credits
 
 - Road speed limits © OpenStreetMap contributors (ODbL).
-- Flight tracks contain data from adsb.lol (ODbL 1.0).
+- Flight routes: adsbdb.com (Virtual Radar Server standing data, CC0) and hexdb.io.
+- Flight tracks (optional archive) contain data from adsb.lol (ODbL 1.0).
 - Airports, runways and navaids: OurAirports (public domain). Airline codes: Wikidata (CC0).
 - Terrain: AWS Open Data Terrain Tiles (Mapzen / Tilezen). Sources, as
   required by its attribution notice: ArcticDEM (DigitalGlobe imagery, NSF

@@ -16,7 +16,7 @@
 
 ## Before you submit
 
-0. **Plane mode's flight archive:** create the public repository `flightdeck-flight-archive` and set it up as described in `Tools/FlightArchive/README.md`. Run the workflow once and check that `https://<you>.github.io/flightdeck-flight-archive/v1/meta.json` loads. Until then, flight-number lookups say the archive isn't reachable and passengers pick airports instead.
+0. **Flight-number lookup** uses adsbdb.com (free, no key), so nothing needs setting up. The flight-track archive in `Tools/FlightArchive/` is optional and off by default.
 
 1. **Decide on the legal points below.** These are the most likely reasons for rejection or later trouble.
 2. **Host the privacy policy** (`AppStore/PRIVACY.md`), add a contact address, and put the URL in App Store Connect.

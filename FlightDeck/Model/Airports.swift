@@ -136,6 +136,9 @@ enum AirlineCodes {
         return decoded
     }()
 
+    /// Live airlines the Wikidata table misses or gets ambiguous.
+    private static let extra: [String: String] = ["4Y": "OCN"]
+
     /// The ICAO callsign for a flight number: "LH 400" → "DLH400". A
     /// designator that is already ICAO (three letters) passes through.
     static func callsign(forFlightNumber text: String) -> String? {
@@ -150,7 +153,7 @@ enum AirlineCodes {
         }
         let prefix = String(chars[0...1])
         let rest = String(chars[2...])
-        guard rest.first?.isNumber == true, let icao = table[prefix] else { return nil }
+        guard rest.first?.isNumber == true, let icao = extra[prefix] ?? table[prefix] else { return nil }
         return icao + Self.trimZeros(rest)
     }
 

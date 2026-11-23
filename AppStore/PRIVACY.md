@@ -21,7 +21,7 @@ to these services. The requests carry no name, account or device identifier.
 |---|---|---|
 | Speed limit (can be switched off in the menu) | OpenStreetMap Overpass API (`overpass-api.de`) | Your current position, about once every 350 m |
 | Route height profile (car and bike) | Amazon Web Services, Open Data terrain tiles (`s3.amazonaws.com`) | Requests for the map tiles that cover the planned route |
-| Flight lookup (plane mode) | The FlightDeck flight-track archive (static files on GitHub Pages) | The flight's callsign, e.g. `DLH400` |
+| Flight lookup (plane mode) | adsbdb.com and hexdb.io, public flight-route APIs | The flight's callsign, e.g. `DLH400` |
 | Offline flight download (plane mode) | Amazon Web Services, Open Data terrain tiles | Requests for the map tiles along the flight's route |
 | Destination search and routing | Apple Maps | Your search text, position and destination |
 | "Open in Google Maps" (only when you tap it) | Google Maps | Your position and destination |
