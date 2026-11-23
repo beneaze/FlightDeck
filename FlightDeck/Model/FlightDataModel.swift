@@ -249,6 +249,8 @@ final class FlightDataModel: NSObject, ObservableObject {
     private var speedSmoother = Smoother(timeConstant: 0.8)
     private var trendSlew = SlewLimiter(maxRate: 10)
     private var lastMotionTimestamp: TimeInterval?
+    /// The interval of the latest motion step, for filters run alongside it.
+    private var lastMotionStepInterval: Double?
     private var lastMotionDate: Date?
 
     // Vehicle acceleration, low-passed to strip road vibration (see
@@ -450,8 +452,10 @@ final class FlightDataModel: NSObject, ObservableObject {
         // The motion callback is the display's frame clock: step every
         // dynamic here so the picture glides at the motion rate between 1 Hz
         // GPS fixes.
+        lastMotionStepInterval = nil
         if let last = lastMotionTimestamp, dm.timestamp - last > 0, dm.timestamp - last < 2 {
             let dt = dm.timestamp - last
+            lastMotionStepInterval = dt
             filteredAcceleration = accelerationFilter.step(toward: acceleration, deltaTime: dt)
             stepSpeedDynamics(deltaTime: dt)
             // Rate of turn about the vertical, clockwise from above positive:
@@ -487,6 +491,12 @@ final class FlightDataModel: NSObject, ObservableObject {
             }
             magneticHeadingDeg = (raw * 180 / .pi + 360)
                 .truncatingRemainder(dividingBy: 360)
+            // Plane mode: the compass seeds the heading until GPS gives a
+            // course (at the gate, slow taxi); the estimator ignores it after.
+            if isFlightMode, let dt = lastMotionStepInterval {
+                planeEstimator.compassHeading(magneticHeadingDeg, dt: dt)
+                applyPlaneEstimate()
+            }
         }
         updateHeading()
     }
@@ -547,8 +557,9 @@ final class FlightDataModel: NSObject, ObservableObject {
     }
 
     /// Prefer GPS track when moving; magnetic heading only when slow/stationary.
-    /// Never the magnetometer in plane mode: in the cabin it reads the
-    /// airframe's metal, and it points along the phone, not the nose.
+    /// In plane mode the estimator decides: the compass only until the first
+    /// GPS course, since in the cabin it reads the airframe's metal and
+    /// points along the phone rather than the nose.
     private func updateHeading() {
         if isFlightMode {
             headingDeg = trackDeg

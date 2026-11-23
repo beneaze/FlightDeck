@@ -296,6 +296,19 @@ struct PlaneModeEstimator {
         }
     }
 
+    /// The phone's compass heading. Used only until the first GPS course:
+    /// standing at the gate or taxiing slowly there is no track, and a
+    /// compass reading (off by the cabin's metal and by how the phone lies,
+    /// but roughly right with the top edge toward the nose) beats a heading
+    /// stuck at 0. Once a course arrives, GPS and the gyro take over for good.
+    mutating func compassHeading(_ heading: Double, dt: Double) {
+        guard !hasCourse, heading.isFinite, dt > 0 else { return }
+        // Follow with a 1 s time constant so the needle doesn't jitter.
+        track += wrap180(heading - track) * min(1, dt / 1.0)
+        displayTrack = track
+        displayOffset = 0
+    }
+
     /// A GPS altitude. `time` is the fix's timestamp, `now` the current time
     /// on the same clock — the difference is the delivery latency.
     mutating func gpsAltitude(feet: Double, accuracyFt: Double, time: Double, now: Double) {
