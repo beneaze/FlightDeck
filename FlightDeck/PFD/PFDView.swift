@@ -89,9 +89,20 @@ struct PFDView: View {
                     with: .color(EFIS.ground))
         sphere.line(from: CGPoint(x: -ext, y: 0), to: CGPoint(x: ext, y: 0), .white, width: Style.medium)
 
+        // The horizon line is a heading scale too: a short mark under it at
+        // every 10° of heading, where the heading tape has its long marks.
+        let heading = flightData.headingDeg
+        var mark = ((heading - 40) / 10).rounded(.up) * 10
+        while mark <= heading + 40 {
+            let x = CGFloat(mark - heading) * PFD.headingScale
+            sphere.line(from: CGPoint(x: x, y: 0), to: CGPoint(x: x, y: PFD.horizonHeadingMarkLength),
+                        .white, width: Style.thin)
+            mark += 10
+        }
+
         // The pitch scale only between the band's lines. The lower one is
         // the ground reference, rising to the horizon line near the ground.
-        let lower = groundReferenceY
+        let (lower, lowerIsHorizon) = groundReference
         var band = ctx
         band.clip(to: Path(CGRect(x: 0, y: PFD.pitchBandTop, width: PFD.canvas,
                                   height: max(0, lower - PFD.pitchBandTop))))
@@ -112,7 +123,8 @@ struct PFDView: View {
         }
 
         // The band's lines: fixed across the window, level whatever the bank.
-        for y in [PFD.pitchBandTop, lower] {
+        // On the ground the lower one is the horizon line itself.
+        for y in lowerIsHorizon ? [PFD.pitchBandTop] : [PFD.pitchBandTop, lower] {
             let half = PFD.windowHalfWidth(atY: y) - PFD.pitchBandLineInset
             ctx.line(from: CGPoint(x: center.x - half, y: y), to: CGPoint(x: center.x + half, y: y),
                      .white, width: Style.medium)
@@ -123,14 +135,19 @@ struct PFDView: View {
 
     /// Height of the lower band line: at the band's foot, or — below 570 ft
     /// radio height — that far below the horizon line where it crosses the
-    /// centre of the window, so it meets the horizon line on touchdown.
-    private var groundReferenceY: CGFloat {
-        guard let height = radioHeightFt, height < PFD.groundReferenceCeilingFt else { return PFD.pitchBandBottom }
+    /// centre of the window, so it closes on the horizon line evenly through
+    /// the last 570 ft and meets it on touchdown. With it, whether it has
+    /// reached the horizon line, which then bounds the scale on its own.
+    private var groundReference: (y: CGFloat, isHorizon: Bool) {
+        guard let height = radioHeightFt, height < PFD.groundReferenceCeilingFt else {
+            return (PFD.pitchBandBottom, false)
+        }
         let roll = flightData.rollDeg * .pi / 180
         let horizonY = PFD.horizonCenter.y
             + PFD.horizonOffset(pitch: flightData.pitchDeg) / CGFloat(max(0.3, cos(roll)))
-        return (horizonY + CGFloat(height) * PFD.groundReferenceScale)
-            .clampedTo(PFD.pitchBandTop + 1...PFD.pitchBandBottom)
+        let offset = CGFloat(max(0, height - PFD.groundReferenceContactFt)) * PFD.groundReferenceScale
+        let y = (horizonY + offset).clampedTo(PFD.pitchBandTop + 1...PFD.pitchBandBottom)
+        return (y, offset < PFD.groundReferenceMergeOffset && y == horizonY + offset)
     }
 
     /// Flight director cross bars — green, centred on the commanded attitude.
@@ -233,30 +250,38 @@ struct PFDView: View {
                          .white, width: Style.thin)
         }
 
-        // Fixed zero index: a triangle standing on the arc, pointing down.
-        context.stroke(triangle(apex: point(0, radius), baseY: center.y - radius - 2.3, halfWidth: 1.6),
-                       with: .color(EFIS.yellow), lineWidth: Style.thin)
+        // Fixed zero-bank reference: a triangle above the arc, pointing down,
+        // its apex on the arc.
+        let i = PFD.bankIndex
+        context.stroke(triangle(apex: point(0, radius), baseY: center.y - radius - i.referenceHeight,
+                                halfWidth: i.referenceHalfWidth),
+                       with: .color(EFIS.yellow), lineWidth: i.lineWidth)
 
-        // Roll pointer and sideslip target, rotating with the horizon.
+        // Roll index and sideslip index, turning with the horizon: a triangle
+        // under the arc pointing up, its apex on the arc — so at wings level
+        // the two triangles meet tip to tip — and under it, after a small
+        // gap, a trapezoid continuing the triangle's sides, so the two read
+        // as one triangle cut across.
         var rolled = context
         rolled.translateBy(x: center.x, y: center.y)
         rolled.rotate(by: .degrees(-flightData.rollDeg))
         rolled.translateBy(x: -center.x, y: -center.y)
 
-        // Pointer just inside the arc, pointing up at the scale.
-        rolled.stroke(triangle(apex: point(0, radius - 0.7), baseY: center.y - radius + 3.4, halfWidth: 1.8),
-                      with: .color(EFIS.yellow), lineWidth: Style.thin)
+        let apexY = center.y - radius
+        let slope = i.rollHalfWidth / i.rollHeight
+        rolled.stroke(triangle(apex: point(0, radius), baseY: apexY + i.rollHeight, halfWidth: i.rollHalfWidth),
+                      with: .color(EFIS.yellow), lineWidth: i.lineWidth)
 
-        // No yaw sensor on a phone, so the slip target stays centred under the
-        // pointer, as it is in coordinated flight: a trapezoid, wider on top.
-        let slipTop = center.y - radius + 3.75, slipBottom = center.y - radius + 5.1
+        // No yaw sensor on a phone, so the sideslip index stays centred under
+        // the roll index, as it is in coordinated flight.
+        let slipTop = apexY + i.rollHeight + i.slipGap, slipBottom = slipTop + i.slipHeight
         var slip = Path()
-        slip.move(to: CGPoint(x: center.x - 1.6, y: slipTop))
-        slip.addLine(to: CGPoint(x: center.x + 1.6, y: slipTop))
-        slip.addLine(to: CGPoint(x: center.x + 1.23, y: slipBottom))
-        slip.addLine(to: CGPoint(x: center.x - 1.23, y: slipBottom))
+        slip.move(to: CGPoint(x: center.x - (slipTop - apexY) * slope, y: slipTop))
+        slip.addLine(to: CGPoint(x: center.x + (slipTop - apexY) * slope, y: slipTop))
+        slip.addLine(to: CGPoint(x: center.x + (slipBottom - apexY) * slope, y: slipBottom))
+        slip.addLine(to: CGPoint(x: center.x - (slipBottom - apexY) * slope, y: slipBottom))
         slip.closeSubpath()
-        rolled.stroke(slip, with: .color(EFIS.yellow), lineWidth: Style.thin)
+        rolled.stroke(slip, with: .color(EFIS.yellow), lineWidth: i.lineWidth)
     }
 
     /// An isosceles triangle with its apex at `apex` and a horizontal base at

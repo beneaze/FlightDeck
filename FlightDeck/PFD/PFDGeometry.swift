@@ -117,6 +117,25 @@ enum PFD {
     /// the window.
     static var bankScaleRadius: CGFloat { horizonCenter.y - windowTop }
 
+    /// The yellow bank indices at the top of the scale. The fixed zero-bank
+    /// reference stands above the arc; the roll index hangs under it, and
+    /// the sideslip index under that continues the roll index's sides.
+    struct BankIndex {
+        let referenceHeight: CGFloat
+        let referenceHalfWidth: CGFloat
+        let rollHeight: CGFloat
+        let rollHalfWidth: CGFloat
+        let slipGap: CGFloat
+        let slipHeight: CGFloat
+        let lineWidth: CGFloat
+    }
+    static let bankIndex = BankIndex(referenceHeight: 2.3, referenceHalfWidth: 1.95,
+                                     rollHeight: 2.45, rollHalfWidth: 2.0,
+                                     slipGap: 0.45, slipHeight: 1.1, lineWidth: 0.4)
+
+    /// The heading marks under the horizon line.
+    static let horizonHeadingMarkLength: CGFloat = 0.9
+
     /// The pitch scale's band. The sky and the ground fill the whole window,
     /// but the graduations show only between two fixed white lines across
     /// it, about 70 % of the way from the horizon centre to the window's top
@@ -136,7 +155,17 @@ enum PFD {
     /// horizon. Display units per foot of height, so the line leaves its
     /// resting place at 570 ft in level flight.
     static let groundReferenceCeilingFt = 570.0
-    static var groundReferenceScale: CGFloat { pitchBandHalfHeight / CGFloat(groundReferenceCeilingFt) }
+    /// Heights up to this count as touchdown for the ground reference: the
+    /// height is GPS altitude less the pack's terrain, and on the runway the
+    /// two disagree by some feet. Within it the line lies on the horizon
+    /// line, and the two read as one.
+    static let groundReferenceContactFt = 20.0
+    static var groundReferenceScale: CGFloat {
+        pitchBandHalfHeight / CGFloat(groundReferenceCeilingFt - groundReferenceContactFt)
+    }
+    /// Closer to the horizon line than this, the ground reference is not
+    /// drawn as a line of its own: the horizon line is the boundary.
+    static let groundReferenceMergeOffset: CGFloat = 0.25
 
     /// Half the window's width at height `y`: the straight sides, or the cap
     /// above or below them.
