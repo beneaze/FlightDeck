@@ -300,7 +300,7 @@ final class SpeedLimitProvider: ObservableObject {
         request.httpMethod = "POST"
         request.timeoutInterval = 15
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("FlightDeck/1.0 (iOS; A320 EFIS for the road)", forHTTPHeaderField: "User-Agent")
+        request.setValue("CockpitView/1.0 (iOS; A320 EFIS for the road)", forHTTPHeaderField: "User-Agent")
         request.httpBody = ("data=" + (query.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""))
             .data(using: .utf8)
 

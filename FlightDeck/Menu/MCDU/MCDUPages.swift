@@ -731,7 +731,7 @@ extension MCDUController {
 
     static let creditLines: [String] = {
         let text = [
-            "FLIGHTDECK IS FOR FUN:",
+            "COCKPITVIEW IS FOR FUN:",
             "NOT A NAVIGATION AID.",
             "",
             "ROAD SPEED LIMITS",

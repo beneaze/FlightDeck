@@ -1,14 +1,14 @@
-# FlightDeck Privacy Policy
+# CockpitView Privacy Policy
 
-_Last updated: 22 November 2026_
+_Last updated: 24 November 2026_
 
-FlightDeck has no accounts, no analytics, no advertising and no tracking. The
+CockpitView has no accounts, no analytics, no advertising and no tracking. The
 developer does not run any server and receives no data from the app.
 
 ## What the app uses on your device
 
-- **Location**: speed, track, altitude and your position on the navigation
-  display. Used only while the app is open.
+- **Location**: your flight's speed, track, altitude and position on the
+  navigation display. Used only while the app is open.
 - **Motion and barometer**: pitch, roll, heading and vertical speed.
 - **Settings** (units, display style, calibration) stay on your device.
 
@@ -19,13 +19,13 @@ to these services. The requests carry no name, account or device identifier.
 
 | Feature | Sent to | What is sent |
 |---|---|---|
-| Speed limit (can be switched off in the menu) | OpenStreetMap Overpass API (`overpass-api.de`) | Your current position, about once every 350 m |
-| Route height profile (car and bike) | Amazon Web Services, Open Data terrain tiles (`s3.amazonaws.com`) | Requests for the map tiles that cover the planned route |
 | Flight lookup (plane mode) | adsbdb.com and hexdb.io, public flight-route APIs | The flight's callsign, e.g. `DLH400` |
 | INIT REQUEST (plane mode, optional) | simbrief.com | The SimBrief username you entered, to fetch your latest SimBrief plan |
 | Offline flight download (plane mode) | Amazon Web Services, Open Data terrain tiles | Requests for the map tiles along the flight's route |
-| Destination search and routing | Apple Maps | Your search text, position and destination |
-| "Open in Google Maps" (only when you tap it) | Google Maps | Your position and destination |
+| Speed limit (car and bike, can be switched off in the menu) | OpenStreetMap Overpass API (`overpass-api.de`) | Your current position, about once every 350 m |
+| Route height profile (car and bike) | Amazon Web Services, Open Data terrain tiles (`s3.amazonaws.com`) | Requests for the map tiles that cover the planned route |
+| Destination search and routing (car and bike) | Apple Maps | Your search text, position and destination |
+| "Open in Google Maps" (car and bike, only when you tap it) | Google Maps | Your position and destination |
 
 Downloaded flights are stored only on your device and are deleted a week
 after the flight's date.

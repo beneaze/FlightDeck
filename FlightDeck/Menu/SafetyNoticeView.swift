@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// Shown once, before the displays: what the app is and is not, and how to
-/// use it on the road. The app is meant to ride along in a moving vehicle,
-/// so this has to be said before the first drive, not buried in a menu.
+/// use it on board. The app is meant to ride along on a flight (and, while
+/// the road modes remain, in a car or on a bike), so this has to be said
+/// before the first use, not buried in a menu.
 struct SafetyNoticeView: View {
     static let acceptedKey = "acceptedSafetyNotice"
 
@@ -15,16 +16,15 @@ struct SafetyNoticeView: View {
                     .font(EFIS.label(20))
                     .foregroundStyle(EFIS.amber)
 
-                Text("FlightDeck shows your car's, bike's or flight's motion in the style of an airliner's displays. It is for fun: not a navigation aid, not a certified instrument, and not for flying an aircraft.")
+                Text("CockpitView follows your flight from your seat in the cabin and shows it the way the pilots see it, on airliner-style displays. It is for fun: not a navigation aid, not a certified instrument, and not for flying an aircraft.")
                     .font(.system(size: 16))
                     .foregroundStyle(.white)
 
                 VStack(alignment: .leading, spacing: 12) {
-                    point("Mount the device securely and set it up before you set off. Don't look at or operate the app while driving or riding.")
-                    point("Speed limits come from OpenStreetMap and may be missing or wrong. Always follow the posted signs.")
-                    point("Speed, altitude and attitude come from the phone's GPS and motion sensors and can be inaccurate.")
-                    point("Obey traffic laws and keep your eyes on the road.")
-                    point("As a passenger, keep the phone in airplane mode and follow the crew's instructions.")
+                    point("On board, keep the phone in airplane mode and follow the crew's instructions on using devices.")
+                    point("Speed, altitude and position come from the phone's GPS and can be inaccurate or drop out. A window seat gives the best reception.")
+                    point("The flight path is the planned route you load or enter. The route the crew actually flies can differ.")
+                    point("In a car or on a bike, set the app up before you set off and never use it while driving or riding. Speed limits come from OpenStreetMap and may be wrong: follow the posted signs.")
                 }
 
                 Button(action: onAccept) {
