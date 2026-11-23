@@ -3,9 +3,9 @@
 Paste these into App Store Connect. Character limits are in brackets.
 
 ## Name [30]
-FlightDeck
+Glassdeck
 
-If the name is taken: `FlightDeck: Road EFIS`, `FlightDeck Glass Cockpit`.
+The App Store record is "Glassdeck" ("FlightDeck" was taken). Bundle ID `com.flightdeck.efis`, SKU `flightdeck-efis`. The home-screen name stays FlightDeck.
 
 ## Subtitle [30]
 Airliner displays for the road

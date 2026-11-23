@@ -60,7 +60,7 @@ display type.
 
 1. Open `FlightDeck.xcodeproj` in Xcode.
 2. Select the FlightDeck target → *Signing & Capabilities* → choose your
-   personal team (bundle id is `com.benny.FlightDeck`, change as you like).
+   personal team (bundle id is `com.flightdeck.efis`, change as you like).
 3. Run on your iPhone. Grant location + motion permission when asked.
 
 Mount the phone upright like an instrument panel (screen facing you):

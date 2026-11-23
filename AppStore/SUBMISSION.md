@@ -21,7 +21,7 @@
 1. **Decide on the legal points below.** These are the most likely reasons for rejection or later trouble.
 2. **Host the privacy policy** (`AppStore/PRIVACY.md`), add a contact address, and put the URL in App Store Connect.
 3. **Support URL**: any page with a way to contact you.
-4. **Create the app in App Store Connect**: bundle ID `com.benny.FlightDeck`, SKU of your choice, name (check availability).
+4. **Create the app in App Store Connect**: bundle ID `com.flightdeck.efis`, SKU of your choice, name (check availability).
 5. **Screenshots** (required):
    - iPhone 6.9": 1320 × 2868 (portrait) or 2868 × 1320. Use an iPhone 17/18 Pro Max simulator.
    - iPad 13": 2064 × 2752 or 2752 × 2064 (needed because the app supports iPad). Use the iPad Pro 13-inch simulator.
