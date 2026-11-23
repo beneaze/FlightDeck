@@ -80,9 +80,9 @@ struct VerticalDisplayView: View {
     /// left, range axis along the bottom, a side-view airplane with its
     /// flight path running ahead over green terrain.
     var style: DisplayStyle = .airbus
-    /// In flight the ground is usually far below the aircraft. With this set
-    /// the window always spans from the lowest ground ahead to above the
-    /// aircraft, so both are in view however high it flies.
+    /// In flight: the window follows the aircraft at a height set by the
+    /// range, as the airliner's VD does, and the ground ahead shows where it
+    /// reaches into it (see `flightWindow`).
     var showsGround = false
 
     /// The annunciation when there is no profile: in flight it is the
@@ -101,15 +101,7 @@ struct VerticalDisplayView: View {
         let full = VD.fullExtentFt(rangeNm: rangeNm)
         let heights = routeElevation.map(\.elevationFt)
 
-        if showsGround {
-            let low = min(heights.min() ?? 0, altitudeFt)
-            let high = max(heights.max() ?? 0, altitudeFt)
-            // Never flatter than the 4° window, so terrain keeps some shape
-            // low down; ground in the lower part, headroom above the aircraft.
-            let extent = max(full, (high - low) * 1.25, 1_000)
-            let lower = max(VD.minAltitudeFt, low - 0.08 * extent)
-            return (lower, lower + extent, VD.dashStepFt(extentFt: extent))
-        }
+        if showsGround { return flightWindow(full: full) }
 
         guard let low = heights.min(), let high = heights.max() else {
             // No path: the aircraft sits in the middle of the window.
@@ -124,6 +116,32 @@ struct VerticalDisplayView: View {
             lower = max(VD.minAltitudeFt, altitudeFt - 0.15 * extent)
         } else if altitudeFt > lower + 0.95 * extent {
             lower = min(VD.maxAltitudeFt, altitudeFt + 0.15 * extent) - extent
+        }
+        return (lower, lower + extent, VD.dashStepFt(extentFt: extent))
+    }
+
+    /// The window in flight, as the airliner's VD frames it: a fixed height
+    /// for the range (the 4° slope), centred on the aircraft and moving
+    /// with it. The ground shows only where it reaches into the window, so
+    /// at cruise the window holds sky and the airplane, not a scale
+    /// stretched down to sea level. Low down the window starts at the
+    /// bottom of the scale.
+    ///
+    /// The scale never runs far beyond what the airliner can reach: its
+    /// top stays within a little of the certified ceiling (A320 FL398,
+    /// 737NG FL410), FL410 to FL450 depending on the range, the window
+    /// shifting down instead and the aircraft riding above the middle at
+    /// cruise. An aircraft actually higher than that is still kept in view.
+    private func flightWindow(full: Double) -> (lowerFt: Double, upperFt: Double, stepFt: Double) {
+        let ceilingFt = style == .boeing ? 41_000.0 : 39_800.0
+        let topLimit = min(45_000, ceilingFt + max(1_000, 0.1 * full))
+        let extent = min(max(full, 1_000), topLimit - VD.minAltitudeFt)
+
+        var lower = max(VD.minAltitudeFt, altitudeFt - 0.5 * extent)
+        lower = max(VD.minAltitudeFt, min(lower, topLimit - extent))
+        // Keep the aircraft inside with a margin whatever the envelope says.
+        if altitudeFt > lower + 0.9 * extent {
+            lower = min(VD.maxAltitudeFt - extent, altitudeFt - 0.9 * extent)
         }
         return (lower, lower + extent, VD.dashStepFt(extentFt: extent))
     }

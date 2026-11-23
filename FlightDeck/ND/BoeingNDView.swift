@@ -57,6 +57,7 @@ struct BoeingNDView: View {
         .background(Boeing.background)
         .onReceive(flightData.$location) { _ in updateTerrain() }
         .onChange(of: rangeIndex) { updateTerrain() }
+        .onChange(of: flightData.autoFlight.terrainOnND) { updateTerrain() }
     }
 
     private var isFlying: Bool { routePlanner.transportMode == .plane }
@@ -66,9 +67,14 @@ struct BoeingNDView: View {
         return routePlanner.destination == nil ? nil : routePlanner.elevationStatus
     }
 
+    /// Terrain shows in plane mode with the EFIS panel's terrain switch on
+    /// (the Airbus TERR ON ND pushbutton, the Boeing TERR switch).
+    private var showsTerrain: Bool { isFlying && flightData.autoFlight.terrainOnND }
+
     private func updateTerrain() {
-        terrain.update(store: isFlying ? packs.activeTerrain : nil, location: flightData.location,
-                       upDeg: upDeg, rangeNm: rangeNm, altitudeFt: flightData.altitudeFt)
+        terrain.update(store: showsTerrain ? packs.activeTerrain : nil, location: flightData.location,
+                       upDeg: upDeg, rangeNm: rangeNm, altitudeFt: flightData.altitudeFt,
+                       verticalSpeedFpm: flightData.verticalSpeedFpm)
     }
 
     // MARK: Display
@@ -97,12 +103,14 @@ struct BoeingNDView: View {
                                 y: B737ND.bandTop - offsetY / scale,
                                 width: size.width / scale, height: size.height / scale)
 
+            drawTerrain(sector)
             drawRangeRings(sector)
             drawMap(sector)
             drawTrackLine(sector)
             drawCompass(sector)
             drawAirplane(sector)
             drawHeadingBox(sector)
+            drawTerrainReadout(sector, bounds)
 
             // Data blocks anchor to the display corners, not to the sector.
             var left = ctx
@@ -268,6 +276,47 @@ struct BoeingNDView: View {
 
     // MARK: Map
 
+    /// With the TERR switch on: TERR in cyan in the lower right, and above
+    /// it the highest and lowest terrain elevations of the picture in
+    /// hundreds of feet, each in the colour of its band.
+    private func drawTerrainReadout(_ context: GraphicsContext, _ bounds: CGRect) {
+        guard showsTerrain, packs.activeTerrain != nil, rangeChangeCount == 0,
+              flightData.location != nil else { return }
+        let x = bounds.maxX - 20
+        var y = bounds.maxY - B737ND.fontSmall
+        context.boeingText("TERR", at: CGPoint(x: x, y: y), size: B737ND.fontSmall, Boeing.cyan,
+                           anchor: .trailing)
+        guard let readout = terrain.readout else { return }
+        let rows = [(readout.lowestFt, readout.lowestHue), (readout.highestFt, readout.highestHue)]
+        for case let (ft?, hue) in rows {
+            y -= B737ND.fontMedium * 1.05
+            context.boeingText(NDTerrainRenderer.hundredsOfFeet(ft), at: CGPoint(x: x, y: y),
+                               size: B737ND.fontMedium, Self.color(hue), anchor: .trailing)
+        }
+    }
+
+    private static func color(_ hue: NDTerrainRenderer.Hue) -> Color {
+        switch hue {
+        case .red: return Boeing.red
+        case .amber: return Boeing.amber
+        case .green: return Boeing.green
+        case .cyan: return Boeing.cyan
+        case .magenta: return Boeing.magenta
+        }
+    }
+
+    /// The terrain picture: the bottom layer of the display, so the range
+    /// rings, rose, route, symbols and every label stay drawn over it.
+    private func drawTerrain(_ context: GraphicsContext) {
+        guard showsTerrain, rangeChangeCount == 0, let location = flightData.location else { return }
+        var ctx = context
+        ctx.clip(to: ringClip)
+        let g = NDGeometry(apex: B737ND.center, radius: B737ND.ringRadius,
+                           rangeNm: rangeNm, origin: location.coordinate, headingDeg: upDeg)
+        terrain.draw(in: ctx, geometry: g, clipCenter: B737ND.center, clipRadius: B737ND.ringRadius,
+                     sweepOrigin: B737ND.planeApex)
+    }
+
     private func drawMap(_ context: GraphicsContext) {
         guard let location = flightData.location else {
             context.boeingText("MAP", at: B737ND.flagPoint, size: B737ND.fontLarge, Boeing.amber)
@@ -285,10 +334,9 @@ struct BoeingNDView: View {
         let g = NDGeometry(apex: B737ND.center, radius: B737ND.ringRadius,
                            rangeNm: rangeNm, origin: location.coordinate, headingDeg: upDeg)
 
-        // In flight: terrain under everything, then the airports around.
+        // In flight: the airports around (the terrain is drawn first, under
+        // everything; see drawTerrain).
         if isFlying {
-            terrain.draw(in: ctx, geometry: g, clipCenter: B737ND.center, clipRadius: B737ND.ringRadius,
-                         sweepOrigin: B737ND.planeApex)
             let planned = Set(routePlanner.flightPlan.map { [$0.origin.icao, $0.destination.icao] } ?? [])
             for airport in g.airportsInView(excluding: planned) {
                 drawAirportSymbol(ctx, at: g.project(airport.coordinate), ident: airport.icao)

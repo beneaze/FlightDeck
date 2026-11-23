@@ -22,10 +22,15 @@ final class NDTerrainLayer: ObservableObject {
         let halfSideNm: Double
         /// The ND range it was rendered for.
         let rangeNm: Double
+        let readout: NDTerrainRenderer.Readout?
     }
 
     /// One sweep, centre to both edges.
     static let sweepDuration: TimeInterval = 4
+
+    /// The side of one dot cell on the screen, in points: the dot patterns
+    /// keep this size at every range. Rounded to whole device pixels.
+    static let dotCellPoints: CGFloat = 1
 
     /// The fully painted picture.
     private var painted: Snapshot?
@@ -35,13 +40,22 @@ final class NDTerrainLayer: ObservableObject {
     private var pending: Snapshot?
     private var isRendering = false
     private var rangeNm: Double?
+    /// Screen size of the map, learned when drawing: screen points per NM
+    /// at the current range, and the device's pixels per point. The
+    /// pictures are rendered at one pixel per dot cell of the screen.
+    private var screenPointsPerNm: CGFloat?
+    private var displayScale: CGFloat = 3
     /// Bumped whenever a picture is replaced, so the ND redraws.
     @Published private(set) var revision = 0
 
+    /// The elevation numbers of the picture on the display.
+    var readout: NDTerrainRenderer.Readout? { (sweeping?.snapshot ?? painted)?.readout }
+
     /// Call on every position update: advances the sweep and keeps the next
-    /// picture coming.
+    /// picture coming. A nil `store` (no pack, or terrain switched off)
+    /// clears the terrain.
     func update(store: TerrainStore?, location: CLLocation?, upDeg: Double,
-                rangeNm: Double, altitudeFt: Double) {
+                rangeNm: Double, altitudeFt: Double, verticalSpeedFpm: Double) {
         guard let store, let location else {
             if painted != nil || sweeping != nil || pending != nil { clear() }
             return
@@ -50,6 +64,7 @@ final class NDTerrainLayer: ObservableObject {
         if self.rangeNm != rangeNm {
             clear()
             self.rangeNm = rangeNm
+            screenPointsPerNm = nil
         }
 
         if let sweep = sweeping, Date().timeIntervalSince(sweep.start) >= Self.sweepDuration {
@@ -62,22 +77,47 @@ final class NDTerrainLayer: ObservableObject {
             pending = nil
             revision += 1
         }
-        guard pending == nil, !isRendering else { return }
+        guard pending == nil, !isRendering, let pointsPerNm = screenPointsPerNm, pointsPerNm > 0
+        else { return }
 
-        isRendering = true
-        let center = location.coordinate
+        // One pixel per dot cell, a whole number of device pixels each, so
+        // every dot comes out the same size on the screen.
+        var devicePixels = max(1, (Self.dotCellPoints * displayScale).rounded())
         // A margin beyond the range, so the map stays covered as it moves
         // during the sweeps until the next picture.
-        let halfSide = rangeNm * 1.4
+        let sidePoints = 2 * 1.4 * CGFloat(rangeNm) * pointsPerNm
+        var resolution = Int((sidePoints / (devicePixels / displayScale)).rounded(.up))
+        while resolution > 1_600 {
+            devicePixels += 1
+            resolution = Int((sidePoints / (devicePixels / displayScale)).rounded(.up))
+        }
+        let halfSide = Double(CGFloat(resolution) * devicePixels / displayScale / pointsPerNm) / 2
+
+        let center = location.coordinate
+        let runway = AirportDatabase.shared.nearest(to: center, withinNm: 30)
+        let heightAboveRunwayFt = runway.map { altitudeFt - $0.elevationFt }
+        // There is no gear to read on a phone: take it as down on a final
+        // descent, within 12 NM and 3000 ft of the nearest airport.
+        let gearDown = runway.map {
+            GreatCircle.distanceNm(center, $0.coordinate) < 12 && (heightAboveRunwayFt ?? .infinity) < 3_000
+                && verticalSpeedFpm < 200
+        } ?? false
+        // Descending faster than 1000 fpm, the bands are measured from the
+        // altitude 30 s ahead, as on the real display.
+        let referenceFt = verticalSpeedFpm < -1_000 ? altitudeFt + verticalSpeedFpm / 2 : altitudeFt
+        let request = NDTerrainRenderer.Request(
+            center: center, upDeg: upDeg, halfSideNm: halfSide, resolution: resolution,
+            viewRangeNm: rangeNm, referenceAltitudeFt: referenceFt, gearDown: gearDown,
+            runwayElevationFt: runway?.elevationFt)
+
+        isRendering = true
         Task.detached(priority: .userInitiated) {
-            let image = NDTerrainRenderer.image(store: store, center: center, upDeg: upDeg,
-                                                rangeNm: halfSide, aircraftAltitudeFt: altitudeFt,
-                                                resolution: 120)
+            let picture = NDTerrainRenderer.picture(store: store, request)
             await MainActor.run {
                 self.isRendering = false
-                guard self.rangeNm == rangeNm, let image else { return }
-                self.pending = Snapshot(image: image, center: center, upDeg: upDeg,
-                                        halfSideNm: halfSide, rangeNm: rangeNm)
+                guard self.rangeNm == rangeNm, let picture else { return }
+                self.pending = Snapshot(image: picture.image, center: center, upDeg: upDeg,
+                                        halfSideNm: halfSide, rangeNm: rangeNm, readout: picture.readout)
             }
         }
     }
@@ -94,6 +134,12 @@ final class NDTerrainLayer: ObservableObject {
     /// sweep in progress.
     func draw(in context: GraphicsContext, geometry g: NDGeometry,
               clipCenter: CGPoint, clipRadius: CGFloat, sweepOrigin: CGPoint) {
+        guard g.rangeNm == rangeNm else { return }
+        // The map's size on the screen, for the next picture's resolution.
+        let t = context.transform
+        screenPointsPerNm = g.pointsPerNm * sqrt(t.a * t.a + t.b * t.b)
+        displayScale = context.environment.displayScale
+
         var ctx = context
         ctx.clip(to: Path(ellipseIn: CGRect(x: clipCenter.x - clipRadius, y: clipCenter.y - clipRadius,
                                             width: 2 * clipRadius, height: 2 * clipRadius)))

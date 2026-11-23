@@ -56,6 +56,7 @@ struct NDView: View {
         .background(EFIS.background)
         .onReceive(flightData.$location) { _ in updateTerrain() }
         .onChange(of: rangeIndex) { updateTerrain() }
+        .onChange(of: flightData.autoFlight.terrainOnND) { updateTerrain() }
     }
 
     private var isFlying: Bool { routePlanner.transportMode == .plane }
@@ -65,10 +66,14 @@ struct NDView: View {
         return routePlanner.destination == nil ? nil : routePlanner.elevationStatus
     }
 
+    /// Terrain shows in plane mode with the EFIS panel's terrain switch on
+    /// (the Airbus TERR ON ND pushbutton, the Boeing TERR switch).
+    private var showsTerrain: Bool { isFlying && flightData.autoFlight.terrainOnND }
+
     private func updateTerrain() {
-        terrain.update(store: isFlying ? packs.activeTerrain : nil, location: flightData.location,
-                       upDeg: flightData.headingDeg, rangeNm: rangeNm,
-                       altitudeFt: flightData.altitudeFt)
+        terrain.update(store: showsTerrain ? packs.activeTerrain : nil, location: flightData.location,
+                       upDeg: flightData.headingDeg, rangeNm: rangeNm, altitudeFt: flightData.altitudeFt,
+                       verticalSpeedFpm: flightData.verticalSpeedFpm)
     }
 
     // MARK: Display
@@ -98,14 +103,16 @@ struct NDView: View {
                                 width: size.width / scale,
                                 height: size.height / scale)
 
-            // Layer order: rose underlay, map, then the track indication over
-            // the flight plan — so the line stays visible with a route active
-            // — and the aircraft symbol on top.
+            // Layer order: terrain at the bottom, then the rose, map, the track
+            // indication over the flight plan — so the line stays visible
+            // with a route active — and the aircraft symbol on top.
+            drawTerrain(sector, bounds)
             drawCompass(sector)
             drawRangeArcs(sector, bounds)
             drawMap(sector, bounds)
             drawTrackIndication(sector)
             drawAirplane(sector)
+            drawTerrainReadout(sector, bounds)
 
             // Data blocks anchor to the display corners, not to the sector.
             var left = ctx
@@ -197,6 +204,34 @@ struct NDView: View {
         return text
     }
 
+    /// With terrain on the ND: TERR in cyan in the lower right corner, and
+    /// above it the highest and lowest terrain elevations of the picture in
+    /// hundreds of feet, each in the colour of its band.
+    private func drawTerrainReadout(_ context: GraphicsContext, _ bounds: CGRect) {
+        guard showsTerrain, packs.activeTerrain != nil, rangeChangeCount == 0,
+              flightData.location != nil else { return }
+        let x = bounds.maxX - 24
+        var y = bounds.maxY - ND.fontSmallest
+        text(context, "TERR", x: x, y: y, size: ND.fontSmallest, EFIS.cyan, anchor: .trailing)
+        guard let readout = terrain.readout else { return }
+        let rows = [(readout.lowestFt, readout.lowestHue), (readout.highestFt, readout.highestHue)]
+        for case let (ft?, hue) in rows {
+            y -= ND.fontIntermediate * 1.05
+            text(context, NDTerrainRenderer.hundredsOfFeet(ft), x: x, y: y, size: ND.fontIntermediate,
+                 Self.color(hue), anchor: .trailing)
+        }
+    }
+
+    private static func color(_ hue: NDTerrainRenderer.Hue) -> Color {
+        switch hue {
+        case .red: return EFIS.red
+        case .amber: return EFIS.amber
+        case .green: return EFIS.green
+        case .cyan: return EFIS.cyan
+        case .magenta: return EFIS.magenta
+        }
+    }
+
     // MARK: Track indication
 
     /// Green track line from the rose centre out to the ring, with a diamond
@@ -241,6 +276,19 @@ struct NDView: View {
     /// Annunciations replacing the map sit in the middle of the sector.
     private var sectorMidY: CGFloat { ND.center.y - ND.ringRadius * 0.6 }
 
+    /// The terrain picture: the bottom layer of the display, so the rose,
+    /// range arcs, route, symbols and every label stay drawn over it.
+    private func drawTerrain(_ context: GraphicsContext, _ bounds: CGRect) {
+        guard showsTerrain, rangeChangeCount == 0, let location = flightData.location else { return }
+        var ctx = context
+        ctx.clip(to: ND.mapClip(in: bounds))
+        let g = NDGeometry(apex: ND.planeCenter, radius: ND.mapRadius,
+                           rangeNm: rangeNm, origin: location.coordinate,
+                           headingDeg: flightData.headingDeg)
+        terrain.draw(in: ctx, geometry: g, clipCenter: ND.center, clipRadius: ND.ringRadius,
+                     sweepOrigin: ND.planeCenter)
+    }
+
     private func drawMap(_ context: GraphicsContext, _ bounds: CGRect) {
         guard let location = flightData.location else {
             text(context, "MAP NOT AVAIL", x: ND.center.x, y: sectorMidY, size: ND.fontLarge,
@@ -263,10 +311,9 @@ struct NDView: View {
                            rangeNm: rangeNm, origin: location.coordinate,
                            headingDeg: flightData.headingDeg)
 
-        // In flight: terrain under everything, then the airports around.
+        // In flight: the airports around (the terrain is drawn first, under
+        // everything; see drawTerrain).
         if isFlying {
-            terrain.draw(in: ctx, geometry: g, clipCenter: ND.center, clipRadius: ND.ringRadius,
-                         sweepOrigin: ND.planeCenter)
             let planned = Set(routePlanner.flightPlan.map { [$0.origin.icao, $0.destination.icao] } ?? [])
             for airport in g.airportsInView(excluding: planned) {
                 drawAirportSymbol(ctx, at: g.project(airport.coordinate), ident: airport.icao)

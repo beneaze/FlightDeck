@@ -19,6 +19,12 @@ struct PFDView: View {
         return packs.activeTerrain?.elevationFt(at: location.coordinate)
     }
 
+    /// Height above that terrain while below the radio height's 2500 ft
+    /// ceiling; nil above it or with no terrain.
+    private var radioHeightFt: Double? {
+        RadioAltitude.height(altitudeFt: flightData.altitudeFt, groundFt: groundElevationFt)
+    }
+
     var profile: AircraftProfile = .a320
 
     /// Stroke widths and type sizes, in canvas units.
@@ -45,6 +51,7 @@ struct PFDView: View {
 
             drawHorizon(ctx)
             drawAircraftReference(ctx)
+            drawRadioHeight(ctx)
             drawDeviationScales(ctx)
             drawBankScale(ctx)
             drawSpeedTape(ctx)
@@ -64,11 +71,17 @@ struct PFDView: View {
         ctx.clip(to: PFD.attitudeWindow)
 
         let center = PFD.horizonCenter
-        var sphere = ctx
-        sphere.translateBy(x: center.x, y: center.y)
-        sphere.rotate(by: .degrees(-flightData.rollDeg))
-        sphere.translateBy(x: 0, y: PFD.horizonOffset(pitch: flightData.pitchDeg))
+        let pitchOffset = PFD.horizonOffset(pitch: flightData.pitchDeg)
+        func onSphere(_ base: GraphicsContext) -> GraphicsContext {
+            var sphere = base
+            sphere.translateBy(x: center.x, y: center.y)
+            sphere.rotate(by: .degrees(-flightData.rollDeg))
+            sphere.translateBy(x: 0, y: pitchOffset)
+            return sphere
+        }
 
+        // Sky and ground fill the whole window.
+        let sphere = onSphere(ctx)
         let ext: CGFloat = 400
         sphere.fill(Path(CGRect(x: -ext, y: -ext, width: 2 * ext, height: ext)),
                     with: .color(EFIS.sky))
@@ -76,21 +89,48 @@ struct PFDView: View {
                     with: .color(EFIS.ground))
         sphere.line(from: CGPoint(x: -ext, y: 0), to: CGPoint(x: ext, y: 0), .white, width: Style.medium)
 
+        // The pitch scale only between the band's lines. The lower one is
+        // the ground reference, rising to the horizon line near the ground.
+        let lower = groundReferenceY
+        var band = ctx
+        band.clip(to: Path(CGRect(x: 0, y: PFD.pitchBandTop, width: PFD.canvas,
+                                  height: max(0, lower - PFD.pitchBandTop))))
+        let ladder = onSphere(band)
+
         // Pitch ladder. Each rung sits at its own angle's horizon offset, so the
         // rungs compress at high attitudes exactly as the horizon does.
         for rung in PFD.pitchLadder {
             let y = -PFD.horizonOffset(pitch: rung.deg)
-            sphere.line(from: CGPoint(x: -rung.halfWidth, y: y),
+            ladder.line(from: CGPoint(x: -rung.halfWidth, y: y),
                         to: CGPoint(x: rung.halfWidth, y: y), .white, width: Style.thin)
             if rung.labelled {
                 let text = "\(abs(Int(rung.deg)))"
                 let gap: CGFloat = 3.8
-                sphere.digits(text, at: CGPoint(x: -rung.halfWidth - gap, y: y), size: Style.scaleType, .white)
-                sphere.digits(text, at: CGPoint(x: rung.halfWidth + gap, y: y), size: Style.scaleType, .white)
+                ladder.digits(text, at: CGPoint(x: -rung.halfWidth - gap, y: y), size: Style.scaleType, .white)
+                ladder.digits(text, at: CGPoint(x: rung.halfWidth + gap, y: y), size: Style.scaleType, .white)
             }
         }
 
+        // The band's lines: fixed across the window, level whatever the bank.
+        for y in [PFD.pitchBandTop, lower] {
+            let half = PFD.windowHalfWidth(atY: y) - PFD.pitchBandLineInset
+            ctx.line(from: CGPoint(x: center.x - half, y: y), to: CGPoint(x: center.x + half, y: y),
+                     .white, width: Style.medium)
+        }
+
         drawFlightDirector(ctx)
+    }
+
+    /// Height of the lower band line: at the band's foot, or — below 570 ft
+    /// radio height — that far below the horizon line where it crosses the
+    /// centre of the window, so it meets the horizon line on touchdown.
+    private var groundReferenceY: CGFloat {
+        guard let height = radioHeightFt, height < PFD.groundReferenceCeilingFt else { return PFD.pitchBandBottom }
+        let roll = flightData.rollDeg * .pi / 180
+        let horizonY = PFD.horizonCenter.y
+            + PFD.horizonOffset(pitch: flightData.pitchDeg) / CGFloat(max(0.3, cos(roll)))
+        return (horizonY + CGFloat(height) * PFD.groundReferenceScale)
+            .clampedTo(PFD.pitchBandTop + 1...PFD.pitchBandBottom)
     }
 
     /// Flight director cross bars — green, centred on the commanded attitude.
@@ -140,6 +180,18 @@ struct PFDView: View {
         let square = Path(CGRect(x: c.x - side / 2, y: c.y - side / 2, width: side, height: side))
         context.fill(square, with: .color(EFIS.background))
         context.stroke(square, with: .color(EFIS.yellow), lineWidth: Style.thin)
+    }
+
+    /// Radio height below 2500 ft: green digits, no frame, centred under the
+    /// aircraft symbol in the window's own section below the pitch band —
+    /// 10 ft steps above 50 ft, 5 ft to 10 ft, then single feet. With no decision height entered (there is
+    /// none to enter here) it turns amber at and below 400 ft.
+    private func drawRadioHeight(_ context: GraphicsContext) {
+        guard let height = radioHeightFt else { return }
+        let shown = RadioAltitude.airbusDisplayed(height)
+        context.digits("\(shown)", at: PFD.radioHeightCenter, size: PFD.radioHeightType,
+                       shown <= RadioAltitude.airbusAmberBelowFt ? EFIS.amber : EFIS.green,
+                       weight: .bold)
     }
 
     // MARK: - Bank scale
@@ -272,23 +324,27 @@ struct PFDView: View {
             drawTrendArrow(clipped, trend: flightData.speedTrendKts * unit, centerY: centerY)
         }
 
-        // Selected speed: a cyan triangle on the tape's edge, or the value
-        // in cyan above or below the tape when it is off the scale.
-        if let selected = autoFlight.selectedSpeedKts.map({ $0 * unit }) {
-            let sy = y(for: selected)
+        // Speed target: an open triangle just outboard of the tape, its apex
+        // on the scale at the target — cyan when selected, magenta when
+        // managed — or the value in the same colour above or below the tape
+        // when the target is off the scale.
+        if let target = speedTarget {
+            let value = target.value * unit
+            let color = target.isManaged ? EFIS.magenta : EFIS.cyan
+            let sy = y(for: value)
             if sy < tape.minY {
-                context.digits("\(Int(selected.rounded()))", at: CGPoint(x: tape.midX, y: tape.minY - 2.0),
-                               size: Style.speedType, EFIS.cyan)
+                context.digits("\(Int(value.rounded()))", at: CGPoint(x: tape.midX, y: tape.minY - 2.0),
+                               size: Style.speedType, color, weight: .bold)
             } else if sy > tape.maxY {
-                context.digits("\(Int(selected.rounded()))", at: CGPoint(x: tape.midX, y: tape.maxY + 2.0),
-                               size: Style.speedType, EFIS.cyan)
+                context.digits("\(Int(value.rounded()))", at: CGPoint(x: tape.midX, y: tape.maxY + 1.9),
+                               size: Style.speedType, color, weight: .bold)
             } else {
                 var bug = Path()
-                bug.move(to: CGPoint(x: tape.maxX - 0.3, y: sy))
-                bug.addLine(to: CGPoint(x: tape.maxX + 2.0, y: sy - 1.2))
-                bug.addLine(to: CGPoint(x: tape.maxX + 2.0, y: sy + 1.2))
+                bug.move(to: CGPoint(x: tape.maxX + 0.15, y: sy))
+                bug.addLine(to: CGPoint(x: tape.maxX + 2.7, y: sy - 1.75))
+                bug.addLine(to: CGPoint(x: tape.maxX + 2.7, y: sy + 1.75))
                 bug.closeSubpath()
-                context.fill(bug, with: .color(EFIS.cyan))
+                context.stroke(bug, with: .color(color), lineWidth: Style.medium)
             }
         }
 
@@ -387,16 +443,7 @@ struct PFDView: View {
             value += 100
         }
 
-        // Cyan FCU altitude bug.
-        let bugY = y(for: flightData.selectedAltitudeFt)
-        if tape.minY...tape.maxY ~= bugY {
-            var bug = Path()
-            bug.move(to: CGPoint(x: tape.minX, y: bugY - 1.5))
-            bug.addLine(to: CGPoint(x: tape.minX + 2.0, y: bugY - 1.5))
-            bug.addLine(to: CGPoint(x: tape.minX + 2.0, y: bugY + 1.5))
-            bug.addLine(to: CGPoint(x: tape.minX, y: bugY + 1.5))
-            clipped.stroke(bug, with: .color(EFIS.cyan), lineWidth: 0.5)
-        }
+        drawAltitudeTarget(context, y: y)
 
         // The ground: a red ribbon outboard of the tape, from the terrain
         // elevation down to the tape's foot. Drawn before the readout, so the
@@ -412,6 +459,40 @@ struct PFDView: View {
         }
 
         drawAltitudeReadout(context, centerY: centerY, altitude: altitude)
+    }
+
+    /// The level-off target on the scale: a box at the target, notched on
+    /// its inboard side where it points at the graduation, with the target's
+    /// hundreds inside — cyan when it is the FCU altitude, magenta when it is
+    /// a constraint the managed climb or descent will level at. Drawn before
+    /// the readout, so level at the target the readout covers it and only the
+    /// box's edges show around the window. Off the scale it gives way to the
+    /// value above or below the tape (see ``drawOfftapeReadouts``).
+    private func drawAltitudeTarget(_ context: GraphicsContext, y: (Double) -> CGFloat) {
+        let tape = PFD.altTape
+        let target = altitudeTarget
+        let ty = y(target.value)
+        guard tape.minY...tape.maxY ~= ty else { return }
+        let color = target.isManaged ? EFIS.magenta : EFIS.cyan
+
+        var ctx = context
+        ctx.clip(to: Path(CGRect(x: tape.minX - 1.5, y: tape.minY, width: tape.width + 4, height: tape.height)))
+        let half: CGFloat = 3.4, notch: CGFloat = 1.1
+        let left = tape.minX - 0.6, right = tape.maxX + 1.0
+        var box = Path()
+        box.move(to: CGPoint(x: left, y: ty - half))
+        box.addLine(to: CGPoint(x: right, y: ty - half))
+        box.addLine(to: CGPoint(x: right, y: ty + half))
+        box.addLine(to: CGPoint(x: left, y: ty + half))
+        box.addLine(to: CGPoint(x: left, y: ty + notch))
+        box.addLine(to: CGPoint(x: left + notch, y: ty))
+        box.addLine(to: CGPoint(x: left, y: ty - notch))
+        box.closeSubpath()
+        ctx.fill(box, with: .color(EFIS.tape))
+        ctx.stroke(box, with: .color(color), lineWidth: Style.medium)
+        ctx.digits(String(format: "%03d", Int((abs(target.value) / 100).rounded())),
+                   at: CGPoint(x: tape.minX + 2.0, y: ty), size: Style.scaleType + 0.3, color,
+                   weight: .bold, anchor: .leading)
     }
 
     /// The yellow readout: hundreds of feet in large green digits over the
@@ -479,10 +560,9 @@ struct PFDView: View {
         let rowHeight: CGFloat = 2.96
         let position = remainder / 20
         let base = position.rounded(.down)
-        // Hold each value steady through most of its 20 ft step, then roll over
-        // quickly, so the current value stays lined up with the index.
-        let raw = CGFloat(position - base)
-        let fraction = raw < 0.7 ? 0 : (raw - 0.7) / 0.3
+        // The drum rolls continuously with the altitude: each 20 ft mark
+        // reaches the index as the altitude passes it.
+        let fraction = CGFloat(position - base)
 
         for step in -2...2 {
             let index = ((Int(base) + step) % 5 + 5) % 5
@@ -698,34 +778,39 @@ struct PFDView: View {
 
         // Mach, under the speed tape.
         if flightData.machNumber >= 0.15 {
+            // Lower when the speed target's value sits under the tape.
+            let speed = flightData.groundSpeedKts
+            let targetBelow = speedTarget.map {
+                CGFloat(speed - $0.value) * CGFloat(flightData.speedUnit.perKnot) * PFD.speedScale
+                    > PFD.tapeHalfHeight
+            } ?? false
             context.digits(String(format: ".%03d", Int((flightData.machNumber * 1000).rounded())),
-                           at: CGPoint(x: PFD.speedTape.midX, y: below), size: Style.annunciationType,
+                           at: CGPoint(x: PFD.speedTape.midX, y: targetBelow ? below + 1.6 : below),
+                           size: Style.annunciationType,
                            EFIS.green, weight: .bold)
         }
 
-        // FCU selected altitude above the tape, baro reference below it.
-        context.digits("\(Int(flightData.selectedAltitudeFt))",
-                       at: CGPoint(x: alt.midX + 1.9, y: above), size: 4.15,
-                       EFIS.cyan, weight: .bold)
-
-        // Height above the ground under the aircraft, in flight.
-        if let ground = groundElevationFt {
-            let height = max(0, flightData.altitudeFt - ground)
-            // Monospaced: each character is about 0.6 of the type size wide.
-            let size: CGFloat = 3.6, advance = size * 0.6
-            let start = alt.midX + 1 - advance * 4.5          // "HGT 34500" centred
-            context.digits("HGT", at: CGPoint(x: start, y: below + 4.4), size: size, .white, anchor: .leading)
-            context.digits("\(Int((height / 10).rounded()) * 10)",
-                           at: CGPoint(x: start + advance * 4, y: below + 4.4), size: size,
-                           height < 2_500 ? EFIS.amber : EFIS.green, weight: .bold, anchor: .leading)
+        // The level-off target, when it is off the scale: its value above
+        // the tape when higher, below it when lower — a flight level under
+        // STD, feet under QNH — in the target's colour.
+        let target = altitudeTarget
+        let offset = CGFloat(target.value - flightData.altitudeFt) * PFD.altScale
+        if abs(offset) > PFD.tapeHalfHeight {
+            let text = flightData.isStandardBaro
+                ? "FL" + String(format: "%03d", Int((target.value / 100).rounded()))
+                : "\(Int(target.value.rounded()))"
+            context.digits(text, at: CGPoint(x: alt.midX + 1.9, y: offset > 0 ? above : alt.maxY + 2.4),
+                           size: 4.15, target.isManaged ? EFIS.magenta : EFIS.cyan, weight: .bold)
         }
 
+        // The baro reference, under the place the target takes below the tape.
+        let baroY = alt.maxY + 6.6
         if flightData.isStandardBaro {
-            context.digits("STD", at: CGPoint(x: alt.midX + 1.9, y: below), size: Style.annunciationType,
+            context.digits("STD", at: CGPoint(x: alt.midX + 1.9, y: baroY), size: Style.annunciationType,
                            EFIS.cyan, weight: .bold)
         } else {
-            context.digits("QNH", at: CGPoint(x: alt.midX - 2.5, y: below), size: 3.8, .white)
-            context.digits("1013", at: CGPoint(x: alt.midX + 5, y: below), size: Style.annunciationType,
+            context.digits("QNH", at: CGPoint(x: alt.midX - 2.5, y: baroY), size: 3.8, .white)
+            context.digits("1013", at: CGPoint(x: alt.midX + 5, y: baroY), size: Style.annunciationType,
                            EFIS.cyan, weight: .bold)
         }
 
@@ -791,6 +876,8 @@ struct PFDView: View {
         else if vs < -500 && af.selectedVerticalSpeedFpm == nil { thrust = "THR IDLE" }
         else { thrust = flightData.machNumber >= 0.5 ? "MACH" : "SPEED" }
 
+        // Armed ALT: cyan toward the FCU altitude, magenta toward a constraint.
+        let altArmedColor = altitudeTarget.isManaged ? EFIS.magenta : EFIS.cyan
         var vertical: FMAEntry
         var verticalArmed: FMAEntry = ("", EFIS.cyan)
         if guidance.isGlideslopeCaptured {
@@ -799,13 +886,13 @@ struct PFDView: View {
             vertical = (abs(vs) < 200 ? "ALT CRZ" : "ALT*", EFIS.green)
         } else if let target = af.selectedVerticalSpeedFpm {
             vertical = (String(format: "V/S %+d", Int(target)), EFIS.green)
-            verticalArmed = ("ALT", EFIS.cyan)
+            verticalArmed = ("ALT", altArmedColor)
         } else if vs > 200 {
             vertical = ("CLB", EFIS.green)
-            verticalArmed = (error > 0 ? "ALT" : "", EFIS.cyan)
+            verticalArmed = (error > 0 ? "ALT" : "", altArmedColor)
         } else if vs < -200 {
             vertical = ("DES", EFIS.green)
-            verticalArmed = (error < 0 ? "ALT" : "", EFIS.cyan)
+            verticalArmed = (error < 0 ? "ALT" : "", altArmedColor)
         } else {
             vertical = ("ALT CRZ", EFIS.green)
         }
@@ -842,6 +929,15 @@ struct PFDView: View {
 
     private var guidance: Guidance { Guidance(flightData: flightData, routePlanner: routePlanner) }
     private var autoFlight: AutoFlight { flightData.autoFlight }
+    private var speedTarget: PFDTarget? {
+        PFDTargets.speed(autoFlight: autoFlight, isRoad: routePlanner.transportMode.isRoad,
+                         roadLimitKts: speedLimits.limitKts, altitudeFt: flightData.altitudeFt)
+    }
+    private var altitudeTarget: PFDTarget {
+        PFDTargets.levelOff(selectedFt: flightData.selectedAltitudeFt, altitudeFt: flightData.altitudeFt,
+                            verticalSpeedFpm: flightData.verticalSpeedFpm, autoFlight: autoFlight,
+                            routePlanner: routePlanner)
+    }
     private var guidanceBearing: Double? { guidance.bearing }
     private var courseError: Double { guidance.courseError }
     private var glideDeviation: Double? { guidance.glideDeviation }

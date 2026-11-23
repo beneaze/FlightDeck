@@ -22,6 +22,23 @@ struct BoeingPFDView: View {
         return packs.activeTerrain?.elevationFt(at: location.coordinate)
     }
 
+    /// Height above that terrain while below the radio altitude's 2500 ft
+    /// ceiling; nil above it or with no terrain.
+    private var radioAltitudeFt: Double? {
+        RadioAltitude.height(altitudeFt: flightData.altitudeFt, groundFt: groundElevationFt)
+    }
+
+    /// Whether the radio altitude is in range — tracked so a descent through
+    /// 2500 ft can be told from a start already below it.
+    private enum RadioBand: Equatable { case unknown, above, within }
+    private var radioBand: RadioBand {
+        guard groundElevationFt != nil else { return .unknown }
+        return radioAltitudeFt == nil ? .above : .within
+    }
+    /// Until when the readout's box is highlighted after descending into
+    /// range.
+    @State private var radioBoxUntil = Date.distantPast
+
     var profile: AircraftProfile = .b737
 
     /// Stroke widths and type sizes, in canvas units.
@@ -39,6 +56,10 @@ struct BoeingPFDView: View {
     }
 
     private var guidance: Guidance { Guidance(flightData: flightData, routePlanner: routePlanner) }
+    private var speedTarget: PFDTarget? {
+        PFDTargets.speed(autoFlight: flightData.autoFlight, isRoad: routePlanner.transportMode.isRoad,
+                         roadLimitKts: speedLimits.limitKts, altitudeFt: flightData.altitudeFt)
+    }
 
     var body: some View {
         Canvas { context, size in
@@ -59,6 +80,14 @@ struct BoeingPFDView: View {
             drawCornerBlocks(ctx)
         }
         .background(Boeing.background)
+        .onChange(of: radioBand) { old, new in
+            // Descending below 2500 ft highlights the box for 10 seconds.
+            if old == .above && new == .within {
+                radioBoxUntil = Date().addingTimeInterval(10)
+            } else if new != .within {
+                radioBoxUntil = .distantPast
+            }
+        }
     }
 
     // MARK: - Attitude
@@ -87,24 +116,39 @@ struct BoeingPFDView: View {
         sphere.line(from: CGPoint(x: -ext, y: 0), to: CGPoint(x: ext, y: 0), Boeing.white, width: Style.line)
 
         // Pitch ladder to ±90°: long rungs every 10° with the angle at both
-        // ends, medium at 5°, short at 2.5°.
+        // ends, medium at 5°, short at 2.5°. The radio altitude's figures at
+        // the foot of the display keep the ground clear around them.
+        var ladderBase = context
+        ladderBase.clip(to: frame)
+        if radioAltitudeFt != nil {
+            let size = B737PFD.radioAltitudeBox, center = B737PFD.radioAltitudeCenter
+            ladderBase.clip(to: Path(CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
+                                            width: size.width, height: size.height)),
+                            options: .inverse)
+        }
+        var ladder = ladderBase
+        ladder.translateBy(x: c.x, y: c.y)
+        ladder.rotate(by: .degrees(-flightData.rollDeg))
+        ladder.translateBy(x: 0, y: pitchOffset)
         for deg in stride(from: 2.5, through: 90, by: 2.5) {
             let tens = deg.truncatingRemainder(dividingBy: 10) == 0
             let fives = deg.truncatingRemainder(dividingBy: 5) == 0
             let half: CGFloat = tens ? 10.6 : (fives ? 4.9 : 2.45)
             for sign in [1.0, -1.0] {
                 let y = -CGFloat(deg * sign) * B737PFD.pixelsPerDegreePitch
-                sphere.line(from: CGPoint(x: -half, y: y), to: CGPoint(x: half, y: y),
+                ladder.line(from: CGPoint(x: -half, y: y), to: CGPoint(x: half, y: y),
                             Boeing.white, width: Style.line)
                 if tens {
                     let label = "\(Int(deg))"
-                    sphere.boeingText(label, at: CGPoint(x: -half - 3.05, y: y), size: Style.label)
-                    sphere.boeingText(label, at: CGPoint(x: half + 3.05, y: y), size: Style.label)
+                    ladder.boeingText(label, at: CGPoint(x: -half - 3.05, y: y), size: Style.label)
+                    ladder.boeingText(label, at: CGPoint(x: half + 3.05, y: y), size: Style.label)
                 }
             }
         }
 
         drawBankScale(context)
+        drawRisingRunway(context)
+        drawRadioAltitude(context)
         drawAircraftSymbol(context)
         // The command bars lie over the aircraft symbol.
         drawFlightDirector(context, pitchOffset: pitchOffset)
@@ -142,6 +186,48 @@ struct BoeingPFDView: View {
         // No yaw sensor on a phone: the slip indicator stays under the pointer.
         rolled.stroke(Path(CGRect(x: -2.65, y: pointerTip + 3.5, width: 5.3, height: 2.0)),
                       with: .color(Boeing.white), lineWidth: Style.line)
+    }
+
+    /// Radio altitude below 2500 ft: large white figures at the bottom centre
+    /// of the attitude display — 10 ft steps, 2 ft below 100 ft. On descent
+    /// into range its box is highlighted white for 10 seconds. It would turn
+    /// amber below the radio minimums; none can be set here, so it stays
+    /// white.
+    private func drawRadioAltitude(_ context: GraphicsContext) {
+        guard let height = radioAltitudeFt else { return }
+        let center = B737PFD.radioAltitudeCenter
+        if Date() < radioBoxUntil {
+            let box = CGRect(x: center.x - B737PFD.radioAltitudeBox.width / 2,
+                             y: center.y - B737PFD.radioAltitudeBox.height / 2,
+                             width: B737PFD.radioAltitudeBox.width, height: B737PFD.radioAltitudeBox.height)
+            context.fill(Path(box), with: .color(Boeing.background))
+            context.stroke(Path(box), with: .color(Boeing.white), lineWidth: Style.medium)
+        }
+        context.boeingText("\(RadioAltitude.boeingDisplayed(height))", at: center,
+                           size: B737PFD.radioAltitudeType)
+    }
+
+    /// The rising runway, with a localiser to follow and the radio altitude
+    /// in range: a green runway under the aircraft symbol, moving sideways
+    /// with the localiser deviation, that climbs to meet the symbol over the
+    /// last 200 ft, its magenta stem reaching back down to where it rose from.
+    private func drawRisingRunway(_ context: GraphicsContext) {
+        guard guidance.showsDeviationScales, let height = radioAltitudeFt else { return }
+        let c = B737PFD.horizonCenter
+        let loc = CGFloat((guidance.localizerError / 10).clamped(to: -1...1))
+        let x = c.x + loc * B737PFD.risingRunwayTravel
+        let rest = c.y + B737PFD.risingRunwayRestOffset
+        let top = rest - CGFloat(RadioAltitude.risingRunwayProgress(height))
+            * (B737PFD.risingRunwayRestOffset - B737PFD.risingRunwayTouchOffset)
+        let bottom = top + B737PFD.risingRunwayHeight
+        let topHalf = B737PFD.risingRunwayTopHalfWidth, bottomHalf = B737PFD.risingRunwayBottomHalfWidth
+
+        let stemFoot = rest + B737PFD.risingRunwayHeight + B737PFD.risingRunwayStem
+        context.line(from: CGPoint(x: x, y: bottom), to: CGPoint(x: x, y: stemFoot),
+                     Boeing.magenta, width: Style.medium)
+        context.polygon([CGPoint(x: x - topHalf, y: top), CGPoint(x: x + topHalf, y: top),
+                         CGPoint(x: x + bottomHalf, y: bottom), CGPoint(x: x - bottomHalf, y: bottom)],
+                        fill: Boeing.background, stroke: Boeing.green, lineWidth: Style.medium)
     }
 
     /// Magenta cross bars. With no autopilot to follow they command the flight
@@ -284,18 +370,22 @@ struct BoeingPFDView: View {
                              CGPoint(x: x + 1.0, y: tip + back)], fill: Boeing.green)
         }
 
-        // MCP speed bug — the MCP speed when one is selected, else the
-        // speed limit when one is known — a magenta pentagon on the inboard
-        // edge, parked at the tape's end when off it.
-        if let limit = flightData.autoFlight.selectedSpeedKts ?? speedLimits.limitKts {
+        // Speed bug — the MCP speed when the IAS/MACH window is open, else
+        // the FMC's (the posted limit on the road, 250 kt below 10,000 ft in
+        // the air), magenta either way — a pentagon on the inboard edge.
+        // Off the scale it parks at the tape's end with half of it showing.
+        if let target = speedTarget {
+            let value = target.value * unit
             let half: CGFloat = 1.8
-            let by = y(limit * unit).clampedTo(tape.minY + half...tape.maxY - half)
+            let by = y(value).clampedTo(tape.minY...tape.maxY)
             let tip = tape.maxX - 0.2
-            context.polygon([CGPoint(x: tip, y: by), CGPoint(x: tip + 2.45, y: by - half),
+            var bugArea = context
+            bugArea.clip(to: Path(CGRect(x: tape.minX, y: tape.minY, width: tape.width + 6, height: tape.height)))
+            bugArea.polygon([CGPoint(x: tip, y: by), CGPoint(x: tip + 2.45, y: by - half),
                              CGPoint(x: tip + 4.9, y: by - half), CGPoint(x: tip + 4.9, y: by + half),
                              CGPoint(x: tip + 2.45, y: by + half)],
                             stroke: Boeing.magenta, lineWidth: Style.medium)
-            context.boeingText("\(Int((limit * unit).rounded()))",
+            context.boeingText("\(Int(value.rounded()))",
                                at: CGPoint(x: tape.midX + 1.4, y: B737PFD.tapeTop - 3.6),
                                size: Style.target, Boeing.magenta)
         }
@@ -394,12 +484,14 @@ struct BoeingPFDView: View {
         }
 
         // MCP altitude bug: a magenta bracket on the inboard edge, notched
-        // where it points at the scale, parked at the tape's end when the
-        // target is off it.
+        // where it points at the scale. Off the scale it parks at the
+        // tape's end with half of it showing.
         let half: CGFloat = 4.9, notch: CGFloat = 1.2
-        let by = y(flightData.selectedAltitudeFt).clampedTo(tape.minY + half...tape.maxY - half)
+        let by = y(flightData.selectedAltitudeFt).clampedTo(tape.minY...tape.maxY)
         let left = tape.minX - 1.8, right = tape.minX + 5.5
-        context.polygon([
+        var bugArea = context
+        bugArea.clip(to: Path(CGRect(x: left - 0.5, y: tape.minY, width: right - left + 1, height: tape.height)))
+        bugArea.polygon([
             CGPoint(x: left, y: by - half), CGPoint(x: right, y: by - half), CGPoint(x: right, y: by + half),
             CGPoint(x: left, y: by + half), CGPoint(x: left, y: by + notch), CGPoint(x: left + notch, y: by),
             CGPoint(x: left, y: by - notch),
@@ -425,16 +517,6 @@ struct BoeingPFDView: View {
                            at: CGPoint(x: tape.midX + 3.1, y: B737PFD.tapeTop - 3.6),
                            size: Style.target, Boeing.magenta)
         let baroY = tape.maxY + 5.0
-        // Height above the ground under the aircraft, in flight.
-        if let ground = groundElevationFt {
-            let height = max(0, flightData.altitudeFt - ground)
-            context.boeingText("HGT", at: CGPoint(x: tape.minX - 0.6, y: baroY + 4.6), size: Style.small,
-                               anchor: .leading)
-            context.boeingText("\(Int((height / 10).rounded()) * 10)",
-                               at: CGPoint(x: tape.maxX + 1.2, y: baroY + 4.6), size: Style.scale,
-                               height < 2_500 ? Boeing.amber : Boeing.white, anchor: .trailing)
-        }
-
         if flightData.isStandardBaro {
             context.boeingText("STD", at: CGPoint(x: tape.midX, y: baroY), size: 4.1, Boeing.green)
         } else {
@@ -467,12 +549,11 @@ struct BoeingPFDView: View {
         let hundreds = (absolute / 100).rounded(.down)
         let remainder = absolute - hundreds * 100
 
-        // The drum holds each 20 ft value through most of its step and rolls
-        // over in the last part, so the current value stays on the index.
+        // The drum rolls continuously with the altitude: each 20 ft mark
+        // reaches the index as the altitude passes it.
         let position = remainder / 20
         let drumBase = position.rounded(.down)
-        let raw = position - drumBase
-        let drumFraction = raw < 0.7 ? 0 : (raw - 0.7) / 0.3
+        let drumFraction = position - drumBase
         for step in -2...2 {
             let index = ((Int(drumBase) + step) % 5 + 5) % 5
             ctx.boeingText(String(format: "%02d", index * 20),
@@ -702,6 +783,33 @@ struct BoeingPFDView: View {
             }
         }
     }
+}
+
+/// The radio altitude and the rising runway, placed from the attitude frame
+/// like the rest of the spec in ``B737PFD``.
+extension B737PFD {
+    /// The radio altitude's figures: centred under the aircraft symbol, at
+    /// the bottom of the attitude display.
+    static var radioAltitudeCenter: CGPoint {
+        CGPoint(x: horizonCenter.x, y: attitudeFrame.maxY - 5.2)
+    }
+    static let radioAltitudeType: CGFloat = 5.3
+    /// The highlight box around four figures.
+    static let radioAltitudeBox = CGSize(width: 13, height: 6.6)
+
+    /// The rising runway's top edge sits this far under the horizon centre
+    /// above 200 ft, and rises to this far under it — just beneath the
+    /// aircraft symbol — on touchdown.
+    static let risingRunwayRestOffset: CGFloat = 12
+    static let risingRunwayTouchOffset: CGFloat = 4.5
+    static let risingRunwayHeight: CGFloat = 1.4
+    static let risingRunwayTopHalfWidth: CGFloat = 3.2
+    static let risingRunwayBottomHalfWidth: CGFloat = 4.4
+    /// The stem below the runway at rest.
+    static let risingRunwayStem: CGFloat = 2.4
+    /// Sideways travel at full-scale localiser deviation, as the scale's
+    /// outer dot.
+    static let risingRunwayTravel: CGFloat = 14.2
 }
 
 #Preview {

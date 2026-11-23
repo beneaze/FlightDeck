@@ -67,11 +67,10 @@ enum PFD {
     /// Display units per degree of pitch near the horizon.
     static let pitchScale: CGFloat = 1.15
     /// Where the scale starts to compress, so large attitudes stay inside
-    /// the window: above the horizon at 20° nose up, below it already at 5°
-    /// nose down, as the window has less room below the aircraft symbol for
-    /// the ground than above it for the sky.
+    /// the window: 20° either side of the horizon. Inside it the graduations
+    /// are evenly spaced above and below, as on the real display.
     static let pitchKneeUpDeg = 20.0
-    static let pitchKneeDownDeg = 5.0
+    static let pitchKneeDownDeg = 20.0
     /// Beyond the knee the scale eases, over about this many degrees, from
     /// full slope to `pitchFarSlope` of it.
     static let pitchSoftDeg = 5.0
@@ -117,6 +116,48 @@ enum PFD {
     /// Radius of the fixed bank-angle scale: its arc runs along the top of
     /// the window.
     static var bankScaleRadius: CGFloat { horizonCenter.y - windowTop }
+
+    /// The pitch scale's band. The sky and the ground fill the whole window,
+    /// but the graduations show only between two fixed white lines across
+    /// it, about 70 % of the way from the horizon centre to the window's top
+    /// and bottom — about 16° either side of level. Above the upper line
+    /// the roll pointer and slip index have the sky to themselves; below
+    /// the lower one is the radio height's own section.
+    static let pitchBandHalfHeight: CGFloat = 18.4
+    static var pitchBandTop: CGFloat { horizonCenter.y - pitchBandHalfHeight }
+    static var pitchBandBottom: CGFloat { horizonCenter.y + pitchBandHalfHeight }
+    /// The band's lines stop this far short of the window's edge.
+    static let pitchBandLineInset: CGFloat = 1.2
+
+    /// The lower line is also the ground reference: below 570 ft radio
+    /// height — the height at which the red ground ribbon appears beside the
+    /// altitude scale — it rises toward the horizon line, reaching it on
+    /// touchdown, so on the ground nothing of the pitch scale shows below the
+    /// horizon. Display units per foot of height, so the line leaves its
+    /// resting place at 570 ft in level flight.
+    static let groundReferenceCeilingFt = 570.0
+    static var groundReferenceScale: CGFloat { pitchBandHalfHeight / CGFloat(groundReferenceCeilingFt) }
+
+    /// Half the window's width at height `y`: the straight sides, or the cap
+    /// above or below them.
+    static func windowHalfWidth(atY y: CGFloat) -> CGFloat {
+        let fromCentre = abs(y - horizonCenter.y)
+        guard fromCentre > windowSideHalfHeight else { return windowHalfWidth }
+        let w = Double(windowHalfWidth), d = Double(windowCapCentreInset)
+        let b = Double(windowCapHeight) + d
+        let a = w / (1 - d * d / (b * b)).squareRoot()
+        let rise = Double(fromCentre - windowSideHalfHeight) + d
+        guard rise < b else { return 0 }
+        return CGFloat(a * (1 - rise * rise / (b * b)).squareRoot())
+    }
+
+    /// The radio height: fixed, not on the sphere — centred under the
+    /// aircraft symbol in the section below the pitch band.
+    static var radioHeightCenter: CGPoint {
+        CGPoint(x: horizonCenter.x, y: (pitchBandBottom + windowBottom) / 2 + 0.2)
+    }
+    /// Type size of the radio height, as large as the altitude readout's.
+    static let radioHeightType: CGFloat = 5.0
 
     // MARK: - Tapes
 
