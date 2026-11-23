@@ -9,13 +9,14 @@ import CoreLocation
 ///
 /// The pictures themselves are rendered off the main thread: the next one
 /// is prepared while the current sweep runs, so a new sweep starts as soon
-/// as the last one ends. Each picture is drawn at the position and
-/// orientation it was rendered for, so terrain stays put on the map as the
-/// map moves and turns between pictures.
+/// as the last one ends. Each picture's band areas are drawn at the position
+/// and orientation they were rendered for, so terrain stays put on the map
+/// as the map moves and turns between pictures; the dots they are painted
+/// with are fixed to the screen's pixels (see ``NDTerrainRenderer``).
 @MainActor
 final class NDTerrainLayer: ObservableObject {
     struct Snapshot {
-        let image: CGImage
+        let layers: [NDTerrainRenderer.Density: CGImage]
         let center: CLLocationCoordinate2D
         let upDeg: Double
         /// Half the side of the picture, in NM.
@@ -28,9 +29,9 @@ final class NDTerrainLayer: ObservableObject {
     /// One sweep, centre to both edges.
     static let sweepDuration: TimeInterval = 4
 
-    /// The side of one dot cell on the screen, in points: the dot patterns
-    /// keep this size at every range. Rounded to whole device pixels.
-    static let dotCellPoints: CGFloat = 1
+    /// The spacing of the band-area samples on the screen, in points: about
+    /// a dot cell, so band edges are as fine as the dots.
+    static let samplePoints: CGFloat = 1.25
 
     /// The fully painted picture.
     private var painted: Snapshot?
@@ -41,12 +42,13 @@ final class NDTerrainLayer: ObservableObject {
     private var isRendering = false
     private var rangeNm: Double?
     /// Screen size of the map, learned when drawing: screen points per NM
-    /// at the current range, and the device's pixels per point. The
-    /// pictures are rendered at one pixel per dot cell of the screen.
+    /// at the current range, and the device's pixels per point.
     private var screenPointsPerNm: CGFloat?
     private var displayScale: CGFloat = 3
     /// Bumped whenever a picture is replaced, so the ND redraws.
     @Published private(set) var revision = 0
+    /// The dot pattern tiles for `displayScale`.
+    private var dotTiles: (scale: CGFloat, tiles: [NDTerrainRenderer.Density: CGImage])?
 
     /// The elevation numbers of the picture on the display.
     var readout: NDTerrainRenderer.Readout? { (sweeping?.snapshot ?? painted)?.readout }
@@ -80,18 +82,16 @@ final class NDTerrainLayer: ObservableObject {
         guard pending == nil, !isRendering, let pointsPerNm = screenPointsPerNm, pointsPerNm > 0
         else { return }
 
-        // One pixel per dot cell, a whole number of device pixels each, so
-        // every dot comes out the same size on the screen.
-        var devicePixels = max(1, (Self.dotCellPoints * displayScale).rounded())
         // A margin beyond the range, so the map stays covered as it moves
         // during the sweeps until the next picture.
         let sidePoints = 2 * 1.4 * CGFloat(rangeNm) * pointsPerNm
-        var resolution = Int((sidePoints / (devicePixels / displayScale)).rounded(.up))
-        while resolution > 1_600 {
-            devicePixels += 1
-            resolution = Int((sidePoints / (devicePixels / displayScale)).rounded(.up))
+        var samplePoints = Self.samplePoints
+        var resolution = Int((sidePoints / samplePoints).rounded(.up))
+        if resolution > 1_200 {
+            resolution = 1_200
+            samplePoints = sidePoints / CGFloat(resolution)
         }
-        let halfSide = Double(CGFloat(resolution) * devicePixels / displayScale / pointsPerNm) / 2
+        let halfSide = Double(CGFloat(resolution) * samplePoints / pointsPerNm) / 2
 
         let center = location.coordinate
         let runway = AirportDatabase.shared.nearest(to: center, withinNm: 30)
@@ -116,7 +116,7 @@ final class NDTerrainLayer: ObservableObject {
             await MainActor.run {
                 self.isRendering = false
                 guard self.rangeNm == rangeNm, let picture else { return }
-                self.pending = Snapshot(image: picture.image, center: center, upDeg: upDeg,
+                self.pending = Snapshot(layers: picture.layers, center: center, upDeg: upDeg,
                                         halfSideNm: halfSide, rangeNm: rangeNm, readout: picture.readout)
             }
         }
@@ -148,28 +148,63 @@ final class NDTerrainLayer: ObservableObject {
         ctx.clip(to: Path(CGRect(x: clipCenter.x - 2 * clipRadius, y: top,
                                  width: 4 * clipRadius, height: sweepOrigin.y - top)))
 
-        guard let sweep = sweeping else {
-            if let painted { place(painted, in: ctx, geometry: g) }
-            return
+        // The pictures to show and where: the painted one alone, or during a
+        // sweep the new one inside the swept wedge and the painted one
+        // outside it.
+        var parts: [(snapshot: Snapshot, clip: Path?, eoFill: Bool)] = []
+        if let sweep = sweeping {
+            // Half-angle the sweep has reached either side of straight ahead.
+            let progress = min(1, Date().timeIntervalSince(sweep.start) / Self.sweepDuration)
+            let wedge = Self.wedge(origin: sweepOrigin, halfAngleDeg: 90 * progress, radius: 4 * clipRadius)
+            if let painted {
+                var outside = Path(CGRect(x: clipCenter.x - 2 * clipRadius, y: top,
+                                          width: 4 * clipRadius, height: 4 * clipRadius))
+                outside.addPath(wedge)
+                parts.append((painted, outside, true))
+            }
+            parts.append((sweep.snapshot, wedge, false))
+        } else if let painted {
+            parts.append((painted, nil, false))
         }
+        guard !parts.isEmpty else { return }
 
-        // Half-angle the sweep has reached either side of straight ahead.
-        let progress = min(1, Date().timeIntervalSince(sweep.start) / Self.sweepDuration)
-        let wedge = Self.wedge(origin: sweepOrigin, halfAngleDeg: 90 * progress, radius: 4 * clipRadius)
-
-        if let painted {
-            // The old picture everywhere the sweep has not reached yet: the
-            // clip region with the wedge cut out of it.
-            var old = ctx
-            var outside = Path(CGRect(x: clipCenter.x - 2 * clipRadius, y: top,
-                                      width: 4 * clipRadius, height: 4 * clipRadius))
-            outside.addPath(wedge)
-            old.clip(to: outside, style: FillStyle(eoFill: true))
-            place(painted, in: old, geometry: g)
+        let tiles = dotTiles(for: displayScale)
+        // One layer per dot density: the band colours of that density where
+        // they lie on the map, smoothly resampled, then cut to the density's
+        // dot pattern laid on the screen's pixel grid, one tile pixel to a
+        // device pixel, so the dots never resample.
+        for density in NDTerrainRenderer.Density.allCases {
+            let images = parts.compactMap { part in part.snapshot.layers[density].map { (part, $0) } }
+            guard !images.isEmpty else { continue }
+            ctx.drawLayer { layer in
+                drawAreas(images, in: layer, geometry: g)
+                guard let tile = tiles[density] else { return }
+                var dots = layer
+                dots.transform = .identity                     // the canvas's own points
+                dots.blendMode = .destinationIn
+                dots.fill(Path(dots.clipBoundingRect),
+                          with: .tiledImage(Image(decorative: tile, scale: displayScale).interpolation(.none)))
+            }
         }
-        var new = ctx
-        new.clip(to: wedge)
-        place(sweep.snapshot, in: new, geometry: g)
+    }
+
+    private func drawAreas(_ images: [((snapshot: Snapshot, clip: Path?, eoFill: Bool), CGImage)],
+                           in context: GraphicsContext, geometry g: NDGeometry) {
+        for (part, image) in images {
+            var c = context
+            if let clip = part.clip { c.clip(to: clip, style: FillStyle(eoFill: part.eoFill)) }
+            place(image, of: part.snapshot, in: c, geometry: g)
+        }
+    }
+
+    private func dotTiles(for scale: CGFloat) -> [NDTerrainRenderer.Density: CGImage] {
+        if let dotTiles, dotTiles.scale == scale { return dotTiles.tiles }
+        var tiles: [NDTerrainRenderer.Density: CGImage] = [:]
+        for density in NDTerrainRenderer.Density.allCases {
+            tiles[density] = NDTerrainRenderer.dotTile(density, displayScale: scale)
+        }
+        dotTiles = (scale, tiles)
+        return tiles
     }
 
     /// A pie slice from `origin`, `halfAngleDeg` either side of straight up.
@@ -185,8 +220,9 @@ final class NDTerrainLayer: ObservableObject {
         return p
     }
 
-    /// Draw one picture where it belongs on the map.
-    private func place(_ snapshot: Snapshot, in context: GraphicsContext, geometry g: NDGeometry) {
+    /// Draw one of a picture's layers where it belongs on the map.
+    private func place(_ image: CGImage, of snapshot: Snapshot, in context: GraphicsContext,
+                       geometry g: NDGeometry) {
         guard snapshot.rangeNm == g.rangeNm else { return }
         let at = g.project(snapshot.center)
         let side = CGFloat(snapshot.halfSideNm * 2) * g.pointsPerNm
@@ -194,8 +230,9 @@ final class NDTerrainLayer: ObservableObject {
         ctx.translateBy(x: at.x, y: at.y)
         // The picture has `upDeg` at its top; the map has `headingDeg`.
         ctx.rotate(by: .degrees(snapshot.upDeg - g.headingDeg))
-        // Nearest-neighbour scaling keeps the dot patterns crisp.
-        ctx.draw(Image(decorative: snapshot.image, scale: 1).interpolation(.none),
+        // Smooth resampling: the band areas carry no dots, so this only
+        // softens their edges.
+        ctx.draw(Image(decorative: image, scale: 1).interpolation(.low),
                  in: CGRect(x: -side / 2, y: -side / 2, width: side, height: side))
     }
 }
@@ -209,3 +246,4 @@ extension NDGeometry {
             .filter { !codes.contains($0.icao) && ($0.isLarge || rangeNm <= 80) }
     }
 }
+

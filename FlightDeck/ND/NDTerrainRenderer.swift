@@ -7,16 +7,22 @@ import CoreLocation
 /// its own density, the dots small and of a fixed size on the screen,
 /// whatever the range.
 ///
-/// Two steps per picture:
-/// 1. **Elevations** on a coarse grid of a few points a cell, from the
-///    flight pack.
-/// 2. **Dots**: the picture has one pixel per dot cell of the screen (about
-///    a point square). Each pixel takes the height interpolated from the
-///    grid, finds its band, and lights only if the band's pattern has a dot
-///    there. So band edges run smoothly between grid nodes and the pattern
-///    period is a pixel or two, never a grid cell. (Lighting whole grid
-///    cells in a pattern, as before, turned the patterns into a chessboard
-///    of cells several points across.)
+/// The work is split in two so the dots come out crisp at any heading:
+/// 1. **Band areas**, here, off the main thread: elevations on a grid of a
+///    few points a cell from the flight pack, interpolated to a finer
+///    sample grid (about a point and a quarter), each sample sorted into its
+///    band. The result is one smooth colour picture per dot density (see
+///    ``Density``), laid out on the map, `upDeg` up.
+/// 2. **Dots**, when drawing (``NDTerrainLayer``): each density's picture is
+///    placed on the map, turned and moved with it and resampled smoothly,
+///    then cut down to that density's dot pattern, which is fixed to the
+///    screen's own pixels (``dotTile(_:displayScale:)``). So the dots are
+///    always the same round, evenly spaced dots on the device pixel grid,
+///    however the map turns or moves, and only the band edges move across
+///    them, softly. (A dot pattern baked into the map picture, as before,
+///    had to be turned and scaled with nearest-neighbour sampling, which
+///    merged and dropped dots into a ragged moiré whenever the map was not
+///    exactly at the angle and position it was rendered for.)
 ///
 /// The bands follow the published EGPWS terrain display (Honeywell MK V /
 /// MK VII EGPWS Pilot Guide, 060-4241-000, "Terrain Alerting and Display";
@@ -45,7 +51,7 @@ import CoreLocation
 enum NDTerrainRenderer {
 
     /// What to draw: the picture covers ±`halfSideNm` around `center` in a
-    /// square of `resolution` pixels, `upDeg` (true) at the top.
+    /// square of `resolution` samples a side, `upDeg` (true) at the top.
     struct Request: Sendable {
         var center: CLLocationCoordinate2D
         var upDeg: Double
@@ -75,8 +81,19 @@ enum NDTerrainRenderer {
         var lowestHue: Hue
     }
 
+    /// The dot densities of the bands, in drawing order. Each band paints
+    /// its colour through the dot pattern of its density; solid fills it,
+    /// last, over the dense dots that run on under it so its soft edge
+    /// leaves no dark seam.
+    enum Density: CaseIterable, Sendable {
+        case dense, medium, sparse, solid
+    }
+
     struct Picture {
-        let image: CGImage
+        /// For each density present, the colours of the bands of that
+        /// density, opaque where they are and clear elsewhere, at
+        /// `Request.resolution` samples a side.
+        let layers: [Density: CGImage]
         let readout: Readout?
     }
 
@@ -123,17 +140,78 @@ enum NDTerrainRenderer {
         }
     }
 
-    /// Whether the band's pattern has a dot at pixel (`x`, `y`). Every
-    /// pattern is a regular lattice: 50 % a checkerboard, 25 % every other
-    /// pixel of every other row, 16 % one in six on an oblique lattice.
-    private static func lit(_ band: Band, x: Int, y: Int) -> Bool {
+    private static func density(_ band: Band) -> Density? {
         switch band {
-        case .none: return false
-        case .greenSolid: return true
-        case .red50, .amber50, .green50: return (x + y) & 1 == 0
-        case .amber25: return x & 1 == 0 && y & 1 == 0
-        case .green16, .cyan16, .magenta16: return y & 1 == 0 && (x + y / 2) % 3 == 0
+        case .none: return nil
+        case .greenSolid: return .solid
+        case .red50, .amber50, .green50: return .dense
+        case .amber25: return .medium
+        case .green16, .cyan16, .magenta16: return .sparse
         }
+    }
+
+    // MARK: Dot patterns
+
+    /// One tile of a density's dot pattern on the screen, in device pixels
+    /// (`displayScale` a point): white round dots, anti-aliased, on clear.
+    /// All dots are the same size and sit at the same place within their
+    /// pixels, so every dot looks the same. The dots lie on staggered rows
+    /// of a cell about 1⅓ pt square (4 pixels at 3×):
+    /// - dense (50 %): every other cell, alternate rows offset by a cell — a
+    ///   square lattice turned 45°;
+    /// - medium (25 %): every other cell in every other row, alternate dot
+    ///   rows offset by a cell — nearly hexagonal;
+    /// - sparse (≈16 %): every third cell (rounded to whole pixels) in every
+    ///   other row, alternate dot rows offset by half that — nearly
+    ///   hexagonal.
+    /// nil for solid, which needs no pattern.
+    static func dotTile(_ density: Density, displayScale: CGFloat) -> CGImage? {
+        let cell = max(2, Int((4 / 3 * displayScale).rounded()))
+        let pitch: Int, rowStep: Int
+        switch density {
+        case .solid: return nil
+        case .dense: pitch = 2 * cell; rowStep = cell
+        case .medium: pitch = 2 * cell; rowStep = 2 * cell
+        case .sparse: pitch = 2 * Int((1.5 * Double(cell)).rounded()); rowStep = 2 * cell
+        }
+        let width = pitch, height = 2 * rowStep
+        // Dot centres in the tile, in pixels, wrapping at the tile edges.
+        let half = Double(cell) / 2
+        let centres = [(half, half), (half + Double(pitch / 2), half + Double(rowStep))]
+        let radius = 0.45 * Double(cell)
+        let samples = 8
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                var covered = 0
+                for sy in 0..<samples {
+                    for sx in 0..<samples {
+                        let px = Double(x) + (Double(sx) + 0.5) / Double(samples)
+                        let py = Double(y) + (Double(sy) + 0.5) / Double(samples)
+                        for (cx, cy) in centres {
+                            // Nearest copy of the dot across the tile edges.
+                            var dx = abs(px - cx), dy = abs(py - cy)
+                            dx = min(dx, Double(width) - dx)
+                            dy = min(dy, Double(height) - dy)
+                            if dx * dx + dy * dy <= radius * radius { covered += 1; break }
+                        }
+                    }
+                }
+                let alpha = UInt8((255 * covered + samples * samples / 2) / (samples * samples))
+                let i = (y * width + x) * 4
+                pixels[i] = alpha; pixels[i + 1] = alpha; pixels[i + 2] = alpha; pixels[i + 3] = alpha
+            }
+        }
+        return image(pixels, width: width, height: height)
+    }
+
+    private static func image(_ pixels: [UInt8], width: Int, height: Int) -> CGImage? {
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: true,
+                       intent: .defaultIntent)
     }
 
     /// The band limits for one picture.
@@ -178,7 +256,7 @@ enum NDTerrainRenderer {
         guard n > 8, request.halfSideNm > 0 else { return nil }
         let half = request.halfSideNm
 
-        // 1. Elevations at the nodes of a coarse grid, about 4 pixels a cell,
+        // 1. Elevations at the nodes of a coarse grid, two samples a cell,
         // in display axes (x right, y down) turned to true north on a
         // flat-earth approximation that is plenty at ND ranges.
         let m = max(48, min(400, n / 2))
@@ -227,56 +305,72 @@ enum NDTerrainRenderer {
         let scheme = Scheme(referenceFt: request.referenceAltitudeFt, lowerYellowFt: lowerYellow,
                             runwayFt: request.runwayElevationFt, peaks: peaks)
 
-        // 3. Dots.
-        var pixels = [UInt8](repeating: 0, count: n * n * 4)
+        // 3. Band areas: one colour picture per density, each sample in the
+        // picture of its band's density, solid green also in the dense one
+        // (see ``Density``).
+        let densities = Density.allCases
+        var planes = [UnsafeMutableBufferPointer<UInt8>]()
+        for _ in densities { planes.append(.allocate(capacity: n * n * 4)) }
+        defer { planes.forEach { $0.deallocate() } }
+        for plane in planes { plane.initialize(repeating: 0) }
+        var used = [Bool](repeating: false, count: densities.count)
+        // Per band: its colour and the planes it paints.
+        var paint = [(colour: RGB, planes: [Int])](repeating: (RGB(r: 0, g: 0, b: 0), []), count: 256)
+        for raw in 0...UInt8.max {
+            guard let band = Band(rawValue: raw), let density = density(band) else { continue }
+            var targets = [densities.firstIndex(of: density)!]
+            if band == .greenSolid { targets.append(densities.firstIndex(of: .dense)!) }
+            paint[Int(raw)] = (rgb(band), targets)
+        }
+        let denseColour = rgb(.green50)
         let gridPerPixel = Double(m) / Double(n)
         let halfPixels = Double(n) / 2
         let lastRow = min(n, Int(halfPixels * 1.4) + 1)          // a little behind the aircraft
         let radiusSquared = halfPixels * halfPixels
         feet.withUnsafeBufferPointer { grid in
-            pixels.withUnsafeMutableBufferPointer { out in
-                for y in 0..<lastRow {
-                    let py = Double(y) + 0.5 - halfPixels
-                    let gy = (Double(y) + 0.5) * gridPerPixel
-                    let row0 = min(m - 1, Int(gy))
-                    let fy = gy - Double(row0)
-                    for x in 0..<n {
-                        let px = Double(x) + 0.5 - halfPixels
-                        guard px * px + py * py <= radiusSquared else { continue }
-                        let gx = (Double(x) + 0.5) * gridPerPixel
-                        let column0 = min(m - 1, Int(gx))
-                        let fx = gx - Double(column0)
-                        let i00 = row0 * nodes + column0
-                        let a = grid[i00], b = grid[i00 + 1]
-                        let c = grid[i00 + nodes], d = grid[i00 + nodes + 1]
-                        let ft: Double
-                        if a.isNaN || b.isNaN || c.isNaN || d.isNaN {
-                            // At the edge of the data: the nearest node.
-                            ft = fy < 0.5 ? (fx < 0.5 ? a : b) : (fx < 0.5 ? c : d)
-                        } else {
-                            ft = (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy
-                        }
-                        let band = ft.isNaN ? Band.magenta16 : scheme.band(forFt: ft)
-                        guard lit(band, x: x, y: y) else { continue }
-                        let colour = rgb(band)
-                        let i = (y * n + x) * 4
+            for y in 0..<lastRow {
+                let py = Double(y) + 0.5 - halfPixels
+                let gy = (Double(y) + 0.5) * gridPerPixel
+                let row0 = min(m - 1, Int(gy))
+                let fy = gy - Double(row0)
+                for x in 0..<n {
+                    let px = Double(x) + 0.5 - halfPixels
+                    guard px * px + py * py <= radiusSquared else { continue }
+                    let gx = (Double(x) + 0.5) * gridPerPixel
+                    let column0 = min(m - 1, Int(gx))
+                    let fx = gx - Double(column0)
+                    let i00 = row0 * nodes + column0
+                    let a = grid[i00], b = grid[i00 + 1]
+                    let c = grid[i00 + nodes], d = grid[i00 + nodes + 1]
+                    let ft: Double
+                    if a.isNaN || b.isNaN || c.isNaN || d.isNaN {
+                        // At the edge of the data: the nearest node.
+                        ft = fy < 0.5 ? (fx < 0.5 ? a : b) : (fx < 0.5 ? c : d)
+                    } else {
+                        ft = (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy
+                    }
+                    let band = ft.isNaN ? Band.magenta16 : scheme.band(forFt: ft)
+                    guard band != .none else { continue }
+                    let entry = paint[Int(band.rawValue)]
+                    let i = (y * n + x) * 4
+                    for (k, target) in entry.planes.enumerated() {
+                        let colour = k == 0 ? entry.colour : denseColour
+                        let out = planes[target]
                         out[i] = colour.r
                         out[i + 1] = colour.g
                         out[i + 2] = colour.b
                         out[i + 3] = 255
+                        used[target] = true
                     }
                 }
             }
         }
 
-        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
-              let image = CGImage(width: n, height: n, bitsPerComponent: 8, bitsPerPixel: 32,
-                                  bytesPerRow: n * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                                  provider: provider, decode: nil, shouldInterpolate: false,
-                                  intent: .defaultIntent)
-        else { return nil }
-        return Picture(image: image, readout: readout(feet: feet, inView: inView, scheme: scheme))
+        var layers: [Density: CGImage] = [:]
+        for (index, density) in densities.enumerated() where used[index] {
+            layers[density] = image(Array(planes[index]), width: n, height: n)
+        }
+        return Picture(layers: layers, readout: readout(feet: feet, inView: inView, scheme: scheme))
     }
 
     /// Highest terrain in view and lowest terrain painted, each with the
