@@ -255,10 +255,14 @@ struct PFDView: View {
         // no limit known the aircraft's VMO stands in, off the top of the
         // tape at any speed a car reaches. Past VMAX the pole is pinned, so
         // the tape stays striped.
-        let vmaxKts = speedLimits.limitKts ?? profile.vmo
-        drawBarberPole(clipped, PFD.vmaxPole,
-                       anchorY: min(y(for: vmaxKts * unit), centerY + PFD.vmaxPoleMaxOffset),
-                       endY: tape.minY - 1.3, visible: tape.minY...tape.maxY, color: EFIS.red)
+        // In plane mode the tape shows ground speed, not airspeed, so a
+        // maximum airspeed has nothing to mark and no pole is drawn.
+        if routePlanner.transportMode.isRoad {
+            let vmaxKts = speedLimits.limitKts ?? profile.vmo
+            drawBarberPole(clipped, PFD.vmaxPole,
+                           anchorY: min(y(for: vmaxKts * unit), centerY + PFD.vmaxPoleMaxOffset),
+                           endY: tape.minY - 1.3, visible: tape.minY...tape.maxY, color: EFIS.red)
+        }
 
         // The airliner's low-speed protections — the amber VLS bar and the
         // alpha-protection pole — are not drawn: they belong to a wing, and a

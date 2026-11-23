@@ -265,7 +265,8 @@ struct NDView: View {
 
         // In flight: terrain under everything, then the airports around.
         if isFlying {
-            terrain.draw(in: ctx, geometry: g, clipCenter: ND.center, clipRadius: ND.ringRadius)
+            terrain.draw(in: ctx, geometry: g, clipCenter: ND.center, clipRadius: ND.ringRadius,
+                         sweepOrigin: ND.planeCenter)
             let planned = Set(routePlanner.flightPlan.map { [$0.origin.icao, $0.destination.icao] } ?? [])
             for airport in g.airportsInView(excluding: planned) {
                 drawAirportSymbol(ctx, at: g.project(airport.coordinate), ident: airport.icao)

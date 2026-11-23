@@ -1,7 +1,7 @@
 # FlightDeck
 
 An iOS app that turns your iPhone/iPad into an airliner glass cockpit — an
-Airbus A320 flight deck or a Boeing 737 one, your choice in the menu:
+Airbus A320 flight deck or a Boeing 737 one, your choice in the MCDU:
 
 - **PFD (Primary Flight Display)** — attitude indicator (pitch/roll from the
   motion sensors), speed tape, altitude tape, vertical speed and heading tape,
@@ -21,7 +21,7 @@ aspect ratio of the window, so it also behaves on iPad / Split View.
 ## Two flight decks
 
 The same data drives two complete sets of displays; **FLIGHT DECK** in the
-menu switches between them and the choice is remembered.
+MCDU's settings page switches between them and the choice is remembered.
 
 | | A320 | B737 |
 |---|---|---|
@@ -71,7 +71,7 @@ pitch/roll are referenced to that orientation.
 | Value | Source |
 |---|---|
 | Pitch | `CMDeviceMotion.gravity` (0° when the phone is vertical) |
-| Roll | **LATERAL G** (default): the bank an aircraft would need for the measured lateral acceleration (`atan(a_lat / g)`, plus any real tilt) — a car corners flat, so gravity alone would always read 0°. **TILT**: the phone's physical bank from gravity. Switch in the menu. |
+| Roll | **LATERAL G** (default): the bank an aircraft would need for the measured lateral acceleration (`atan(a_lat / g)`, plus any real tilt) — a car corners flat, so gravity alone would always read 0°. **TILT**: the phone's physical bank from gravity. Switch on the MCDU's settings page. |
 | Heading / track | GPS course when moving (> 3 kt), carried between fixes by the gyro yaw rate; magnetic heading (rotation matrix) when stationary |
 | Position | GPS fixes, dead-reckoned along the track at ground speed between them |
 | Ground speed | `CLLocation.speed`, smoothed with a 0.8 s time constant |
@@ -93,7 +93,7 @@ always correct.
 ## Route planning
 
 Search uses `MKLocalSearch` and routing `MKDirections` (Apple Maps — no API
-key needed), for a **car** or a **bicycle** — pick the mode in the menu or
+key needed), for a **car** or a **bicycle** — pick the mode on the MCDU or
 in the destination picker; switching with a destination active replans at
 once. The map button opens the identical route in Google Maps via universal
 URL, in the same travel mode. If you later want routes computed *by* Google,
@@ -104,11 +104,39 @@ The aircraft is projected onto the nearest route leg on every position
 update, so distance-to-go, the TO waypoint and the flight director's
 look-ahead point all move continuously along the plan.
 
+## MCDU
+
+Every setting, the route and the flight are set up on an MCDU, operated the
+way a pilot operates one. Swipe right from anywhere to bring it up; its
+**◂ DISPLAYS** key or a left swipe returns to the instruments. Beside the A320
+displays it is an Airbus MCDU; beside the 737's, a Boeing CDU, with that
+unit's colours, page names and an EXEC key that lights when a downloaded
+flight is waiting to be activated.
+
+Type on the keypad into the scratchpad (the bottom line), then press the
+line-select key beside a field to enter it, as on the real unit; `CLR` (737:
+`DEL`) on an empty scratchpad followed by a line-select key deletes that
+entry. Wrong entries answer FORMAT ERROR, NOT IN DATA BASE or ENTRY OUT OF
+RANGE in the scratchpad.
+
+| Page | A320 key | 737 key | |
+|---|---|---|---|
+| Menu | MCDU MENU | MENU | CAR / BIKE / PLANE, prompts to every page |
+| Route / flight setup | INIT | RTE | Plane: FLT NBR, FROM/TO, DATE, CRZ FL, DOWNLOAD*, ACTIVATE*. Car/bike: DEST, MAP> |
+| Destination search | DIR | FIX | Apple Maps search results; pick one, then FLY* |
+| Flight plan | F-PLN | LEGS | Waypoints with distance, planned altitude and ETA |
+| Progress | PROG | PROG | GS, altitude, height above ground, distances, ETE/ETA, position |
+| Settings | PERF | INIT REF | Units, flight deck, roll source, speed limit, attitude zero |
+| Stored flights | DATA | via INIT REF | Downloaded flight packs: activate, resume, delete |
+
+The MCDU is our own drawing, laid out parametrically like the displays.
+
 ## Plane mode
 
-For passengers: choose **PLANE** in the menu, then **SELECT FLIGHT**.
+For passengers: on the MCDU's MENU page choose **PLANE**, then open the INIT (A320) / RTE (737) page.
 
-1. **Pick the flight.** Type a flight number (`LH400`) and tap *Look up*. The
+1. **Pick the flight.** Type a flight number (`LH400`) into the scratchpad and
+   press the line-select key beside FLT NBR. The
    app turns it into the ICAO callsign aircraft transmit (`DLH400`, via a
    bundled IATA→ICAO airline table from Wikidata, CC0) and fetches that
    callsign's most recent flown track from the **free flight-track archive**
@@ -117,7 +145,7 @@ For passengers: choose **PLANE** in the menu, then **SELECT FLIGHT**.
    without internet, choose the two airports from the built-in list
    (OurAirports, public domain, about 3,300 airports): the route is then a
    great circle.
-2. **Download for offline.** One tap stores a *flight pack*: the plan and the
+2. **Download for offline.** DOWNLOAD* stores a *flight pack*: the plan and the
    terrain along the route (AWS Open Data terrain tiles, about ±80 NM either
    side, finer around both airports). Packs live in Application Support,
    excluded from backups, and are deleted a week after the flight.
@@ -186,7 +214,7 @@ made per ~350 m of travel. The limit becomes VMAX on the PFD: the red
 barber pole starts at
 the limit; `maxspeed=none` (autobahn) shows no pole. Roads without a tag
 show nothing rather than a guess. The lookup sends your position to a
-third-party server and can be switched off in the menu. Road data ©
+third-party server and can be switched off on the MCDU's settings page. Road data ©
 OpenStreetMap contributors (ODbL).
 
 ## App icon
@@ -210,8 +238,8 @@ A flight deck is a `DisplayStyle` case (`Model/DisplayStyle.swift`), an
 `AircraftProfile` with its speed envelope and ND ranges
 (`Model/AircraftProfile.swift`), a colour/type/geometry file under `Style/`,
 and a PFD and ND view drawn in one fixed coordinate system from a
-parametric layout spec. `ContentView` picks the views for the selected style; the menu's
-FLIGHT DECK buttons come from `DisplayStyle.allCases`. The route guidance the
+parametric layout spec. `ContentView` picks the views for the selected style; the MCDU's
+FLIGHT DECK choice comes from `DisplayStyle`. The route guidance the
 flight director and deviation scales use is shared in `Model/Guidance.swift`,
 and `VerticalDisplayView` takes a `style` for its colours.
 
@@ -235,9 +263,12 @@ FlightDeck/
 │   ├── DisplayStyle.swift       Which flight deck the displays imitate
 │   └── Guidance.swift           Course and path deviation from the flight plan
 ├── Menu/
-│   ├── SideMenuView.swift       Settings drawer
-│   ├── DestinationPickerView.swift
-│   ├── FlightPickerView.swift   Plane mode: flight lookup, airports, offline download
+│   ├── MCDU/                    The MCDU: all settings, route and flight setup
+│   │   ├── MCDUStyle.swift      Airbus MCDU / Boeing CDU look, keys, screen types
+│   │   ├── MCDUController.swift Keys, scratchpad, actions
+│   │   ├── MCDUPages.swift      The pages and their line-select keys
+│   │   └── MCDUView.swift       The unit on screen
+│   ├── DestinationPickerView.swift  Map picker (MCDU MAP> prompt)
 │   └── SafetyNoticeView.swift   One-time safety notice
 ├── PFD/
 │   ├── PFDGeometry.swift        A320 PFD layout spec

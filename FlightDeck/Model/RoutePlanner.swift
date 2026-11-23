@@ -239,7 +239,9 @@ final class RoutePlanner: ObservableObject {
         destination = Destination(name: plan.destination.code, coordinate: plan.destination.coordinate)
         errorMessage = nil
 
-        routeCoordinates = plan.coordinates
+        // Densified, so plans saved before densifying existed draw and
+        // sequence along the same great circles too.
+        routeCoordinates = FlightPlan.densified(plan.route).map(\.coordinate)
         routeMapPoints = routeCoordinates.map(MKMapPoint.init)
         cumulativeMeters = [0]
         for i in 1..<routeCoordinates.count {

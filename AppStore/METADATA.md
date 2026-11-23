@@ -40,7 +40,7 @@ PLANE MODE FOR PASSENGERS
 • Flight paths come from the track the flight flew on an earlier day; GPS required (iPhone, or iPad with cellular)
 
 TWO FLIGHT DECKS
-Choose between two classic airliner display styles in the menu. Speed in km/h, mph or knots; vertical speed in m/s or ft/min.
+Choose between two classic airliner display styles. Everything is set up on a working MCDU / CDU: type into the scratchpad, press the line-select keys, just like in the cockpit. Speed in km/h, mph or knots; vertical speed in m/s or ft/min.
 
 Works in portrait and landscape, on iPhone and iPad, including Split View.
 
@@ -81,8 +81,8 @@ Answered in the build: `ITSAppUsesNonExemptEncryption = NO` (HTTPS only).
 ## App Review notes
 FlightDeck shows the device's own motion in airliner-style displays and is meant to be mounted in a car or on a bike.
 
-To try it at a desk: grant location and motion access, then tilt the device to move the attitude indicator, and turn it to change heading. Speed and the moving map need real movement. Swipe right from anywhere to open the menu; there you can pick a destination (SELECT DESTINATION) to see a route on the navigation display and its height profile, and switch between the two display styles (FLIGHT DECK).
+To try it at a desk: grant location and motion access, then tilt the device to move the attitude indicator, and turn it to change heading. Speed and the moving map need real movement. Swipe right from anywhere to open the MCDU (the cockpit's flight computer keypad). On the MENU page pick CAR; on the INIT page type a place into the scratchpad (bottom line) with the keypad and press the key beside DEST, pick a result and press FLY* to see a route on the navigation display. PERF opens the settings, where FLIGHT DECK switches between the two display styles. ◂ DISPLAYS returns to the instruments.
 
-Plane mode: in the menu choose PLANE, then SELECT FLIGHT. Type a flight number (e.g. LH400) and tap Look up, or choose two airports, then Download for offline. The displays then show that flight; on the ground in Cupertino the aircraft symbol simply sits at your position.
+Plane mode: on the MCDU MENU page choose PLANE, then INIT. Type a flight number (e.g. LH400) and press the key beside FLT NBR, or type two airport codes like ZRH/LIS and press the key beside FROM/TO, then press DOWNLOAD*. The displays then show that flight; on the ground in Cupertino the aircraft symbol simply sits at your position.
 
 On first launch the app shows a one-time safety notice. No account or login is needed.

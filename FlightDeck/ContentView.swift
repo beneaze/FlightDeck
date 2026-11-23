@@ -5,8 +5,8 @@ import SwiftUI
 /// behaves sensibly on iPad and in split screen. Which flight deck's
 /// displays appear — Airbus or Boeing — is the crew's choice in the menu.
 ///
-/// A settings drawer (attitude calibration and friends) slides in from the
-/// left edge on a right swipe.
+/// A right swipe brings up the MCDU, where the route or flight is set up and
+/// every setting lives; a left swipe (or its DISPLAYS key) puts it away.
 struct ContentView: View {
     @EnvironmentObject private var flightData: FlightDataModel
     @EnvironmentObject private var routePlanner: RoutePlanner
@@ -14,9 +14,8 @@ struct ContentView: View {
     @EnvironmentObject private var flightPacks: FlightPackStore
 
     @State private var isMenuOpen = false
+    @StateObject private var mcdu = MCDUController()
     @AppStorage(SafetyNoticeView.acceptedKey) private var hasAcceptedSafetyNotice = false
-
-    private let menuWidth: CGFloat = 280
 
     var body: some View {
         GeometryReader { proxy in
@@ -41,18 +40,10 @@ struct ContentView: View {
                     locationDeniedBanner
                 }
 
-                // Scrim: dims the instruments and closes the menu on a tap.
-                if isMenuOpen {
-                    Color.black.opacity(0.5)
-                        .ignoresSafeArea()
-                        .onTapGesture { setMenu(open: false) }
-                }
-
-                SideMenuView(isOpen: $isMenuOpen)
-                    .frame(width: menuWidth)
-                    .offset(x: isMenuOpen ? 0 : -menuWidth - 20)
             }
-            .animation(.easeOut(duration: 0.22), value: isMenuOpen)
+            .fullScreenCover(isPresented: $isMenuOpen) {
+                MCDUView(controller: mcdu)
+            }
             .simultaneousGesture(
                 DragGesture(minimumDistance: 30)
                     .onEnded { value in
@@ -61,7 +52,6 @@ struct ContentView: View {
                         guard abs(value.translation.width) > abs(value.translation.height)
                         else { return }
                         if value.translation.width > 60 { setMenu(open: true) }
-                        if value.translation.width < -60 { setMenu(open: false) }
                     }
             )
         }
@@ -74,10 +64,20 @@ struct ContentView: View {
         // pass — so the guidance follows the dead-reckoned position between
         // fixes. Speed limits match against the fixes themselves.
         .onReceive(flightData.$location) { routePlanner.updateProgress(location: $0) }
-        .onReceive(flightData.$gpsFix) { speedLimits.update(fix: $0, trackDeg: flightData.trackDeg) }
+        .onReceive(flightData.$gpsFix) {
+            // Road speed limits only on the road: in plane mode no position
+            // goes to OpenStreetMap.
+            guard routePlanner.transportMode.isRoad else { return }
+            speedLimits.update(fix: $0, trackDeg: flightData.trackDeg)
+        }
         // Plane mode: the sensors switch to their in-cabin sources, and the
         // active flight pack's plan becomes the route.
-        .onAppear(perform: syncFlightMode)
+        .onAppear {
+            mcdu.attach(routePlanner: routePlanner, flightData: flightData,
+                        packs: flightPacks, speedLimits: speedLimits)
+            mcdu.close = { isMenuOpen = false }
+            syncFlightMode()
+        }
         .onChange(of: routePlanner.transportMode) { syncFlightMode() }
         .onChange(of: flightPacks.activePackID) { syncFlightMode() }
         .onChange(of: routePlanner.flightPlan?.id) {
@@ -142,6 +142,7 @@ struct ContentView: View {
     private func syncFlightMode() {
         let flying = routePlanner.transportMode == .plane
         flightData.isFlightMode = flying
+        if flying { speedLimits.pause() }
         #if DEBUG
         // Test hook: `-debugFlight LSZH-LPPT` plans and downloads that flight
         // on launch, so plane mode can be exercised without the picker.

@@ -95,6 +95,13 @@ final class SpeedLimitProvider: ObservableObject {
         fetchIfNeeded(around: fix.coordinate)
     }
 
+    /// Forget the current limit and stop matching until the next fix — for
+    /// plane mode, where road limits mean nothing and no position should be
+    /// sent to OpenStreetMap.
+    func pause() {
+        clear()
+    }
+
     private func clear() {
         limitKts = nil
         isUnrestricted = false

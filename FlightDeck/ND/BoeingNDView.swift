@@ -287,7 +287,8 @@ struct BoeingNDView: View {
 
         // In flight: terrain under everything, then the airports around.
         if isFlying {
-            terrain.draw(in: ctx, geometry: g, clipCenter: B737ND.center, clipRadius: B737ND.ringRadius)
+            terrain.draw(in: ctx, geometry: g, clipCenter: B737ND.center, clipRadius: B737ND.ringRadius,
+                         sweepOrigin: B737ND.planeApex)
             let planned = Set(routePlanner.flightPlan.map { [$0.origin.icao, $0.destination.icao] } ?? [])
             for airport in g.airportsInView(excluding: planned) {
                 drawAirportSymbol(ctx, at: g.project(airport.coordinate), ident: airport.icao)

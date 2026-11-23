@@ -255,9 +255,11 @@ struct BoeingPFDView: View {
 
         // Maximum speed: the posted limit, or VMO with none known. A red and
         // black barber pole rises from it along the tape's inboard edge.
+        // In plane mode the tape shows ground speed, not airspeed, so a
+        // maximum airspeed has nothing to mark and no pole is drawn.
         let vmax = (speedLimits.limitKts ?? profile.vmo) * unit
         let poleFoot = y(vmax)
-        if poleFoot > tape.minY {
+        if routePlanner.transportMode.isRoad, poleFoot > tape.minY {
             let poleWidth: CGFloat = 1.4, block: CGFloat = 1.6
             let x = tape.maxX - poleWidth
             clipped.fill(Path(CGRect(x: x, y: tape.minY, width: poleWidth, height: max(0, poleFoot - tape.minY))),

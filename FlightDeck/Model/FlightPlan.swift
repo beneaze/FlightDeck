@@ -101,9 +101,9 @@ struct FlightPlan: Codable, Identifiable, Hashable {
         self.date = date
         self.origin = origin
         self.destination = destination
-        let points = route ?? GreatCircle.points(from: origin.coordinate, to: destination.coordinate,
-                                                 spacingNm: 5)
-            .map { RoutePoint(latitude: $0.latitude, longitude: $0.longitude, altitudeFt: nil) }
+        let points = route.map(Self.densified)
+            ?? GreatCircle.points(from: origin.coordinate, to: destination.coordinate, spacingNm: 5)
+                .map { RoutePoint(latitude: $0.latitude, longitude: $0.longitude, altitudeFt: nil) }
         self.route = points
         self.source = route == nil ? .greatCircle : source
         let distance = Self.length(of: points)
@@ -112,8 +112,41 @@ struct FlightPlan: Codable, Identifiable, Hashable {
             ?? Self.defaultCruiseAltitudeFt(distanceNm: distance)
     }
 
+    /// A path with no leg longer than 5 NM: long legs (an archived track
+    /// across a gap in receiver coverage, say) get great-circle points in
+    /// between, with altitudes interpolated. The plan is then the same
+    /// curve wherever it is used — flown by the demo, projected onto for
+    /// progress, drawn on the ND — instead of a great circle in one place
+    /// and a straight map line in another.
+    static func densified(_ points: [RoutePoint]) -> [RoutePoint] {
+        guard var previous = points.first else { return points }
+        var result = [previous]
+        for point in points.dropFirst() {
+            let legNm = GreatCircle.distanceNm(previous.coordinate, point.coordinate)
+            let pieces = Int(ceil(legNm / 5))
+            if pieces > 1 {
+                for i in 1..<pieces {
+                    let f = Double(i) / Double(pieces)
+                    let c = GreatCircle.intermediate(previous.coordinate, point.coordinate, fraction: f)
+                    let alt: Double? = previous.altitudeFt.flatMap { a in point.altitudeFt.map { a + ($0 - a) * f } }
+                    result.append(RoutePoint(latitude: c.latitude, longitude: c.longitude, altitudeFt: alt))
+                }
+            }
+            result.append(point)
+            previous = point
+        }
+        return result
+    }
+
     /// Display name: the flight number, or the city pair.
     var title: String { flightNumber ?? "\(origin.code)–\(destination.code)" }
+
+    /// One line for lists: "SK455  OSL → CPH", or just "OSL → CPH" when the
+    /// flight was planned by airports alone.
+    var summary: String {
+        let pair = "\(origin.code) → \(destination.code)"
+        return flightNumber.map { "\($0)  \(pair)" } ?? pair
+    }
 
     var coordinates: [CLLocationCoordinate2D] { route.map(\.coordinate) }
 
