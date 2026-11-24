@@ -526,13 +526,14 @@ struct PFDView: View {
         box.addLine(to: CGPoint(x: left + notch, y: ty))
         box.addLine(to: CGPoint(x: left, y: ty - notch))
         box.closeSubpath()
+        ctx.stroke(box, with: .color(color), lineWidth: Style.medium)
         // The value sits on a black band across the tape, the readout
-        // window's height, as the readout's digits do, so the graduations
-        // never print through it.
+        // window's height, as the readout's digits do. It lies over the
+        // box, so the box's outboard edge breaks off at the band; the
+        // notched edge stands proud of the tape and stays whole.
         ctx.fill(Path(CGRect(x: tape.minX, y: ty - PFD.altWindowHalfHeight,
                              width: tape.width, height: 2 * PFD.altWindowHalfHeight)),
                  with: .color(EFIS.background))
-        ctx.stroke(box, with: .color(color), lineWidth: Style.medium)
 
         // The value in the scale's own type, hundreds of feet without
         // leading zeros, right-aligned.
