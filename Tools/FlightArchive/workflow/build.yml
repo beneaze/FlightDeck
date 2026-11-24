@@ -1,0 +1,108 @@
+# Daily build of the flight-track archive from adsb.lol's open ADS-B data.
+# Copy to .github/workflows/build.yml in the public archive repository, next to
+# build_archive.py at the repository root.
+name: Build flight archive
+
+on:
+  schedule:
+    - cron: "15 6 * * *"     # adsb.lol publishes the previous day overnight (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Find the latest prod release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          year=$(date -u +%Y)
+          find_release() {
+            gh api "repos/adsblol/globe_history_$1/releases?per_page=30" \
+              --jq '[.[] | select(.tag_name | test("-planes-readsb-prod-0$"))][0].tag_name // empty'
+          }
+          tag=$(find_release "$year" || true)
+          repo="adsblol/globe_history_$year"
+          if [ -z "$tag" ]; then           # early January: nothing in the new year yet
+            year=$((year - 1))
+            tag=$(find_release "$year")
+            repo="adsblol/globe_history_$year"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          echo "Using $repo $tag"
+
+      - name: Restore the previous archive
+        uses: actions/cache/restore@v4
+        with:
+          path: previous
+          key: archive-${{ steps.release.outputs.tag }}
+          restore-keys: archive-
+
+      - name: Cache the airport list
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: airports-${{ github.run_id }}
+          restore-keys: airports-
+
+      - name: Stream the release through the builder
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The release is split into .tar.aa, .tar.ab, …; concatenated in name
+          # order they form one tar. Nothing is stored on disk: each part is
+          # downloaded straight into the pipe.
+          urls=$(gh api "repos/${{ steps.release.outputs.repo }}/releases/tags/${{ steps.release.outputs.tag }}" \
+            --jq '[.assets[] | select(.name | test("\\.tar(\\.a[a-z])?$"))] | sort_by(.name) | .[].browser_download_url')
+          mkdir -p previous
+          ( for url in $urls; do
+              curl -sSfL --retry 5 --retry-delay 10 -A "archive-build-script/1.0" "$url"
+            done ) | python3 build_archive.py \
+              --out out \
+              --previous previous \
+              --release "${{ steps.release.outputs.tag }}" \
+              --airports-cache .cache/airports.csv
+          cp LICENSE-DATA.md out/ 2>/dev/null || true
+          touch out/.nojekyll
+
+      - name: Save this archive for tomorrow
+        run: rm -rf previous && cp -r out previous
+
+      - uses: actions/cache/save@v4
+        with:
+          path: previous
+          key: archive-${{ steps.release.outputs.tag }}
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

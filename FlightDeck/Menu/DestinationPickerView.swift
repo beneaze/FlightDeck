@@ -122,12 +122,19 @@ struct DestinationPickerView: View {
                     .foregroundStyle(selectedName == nil ? .secondary : .primary)
                     .lineLimit(1)
                 if selectedName != nil {
-                    Text("Route is planned from the current position")
+                    Text("\(routePlanner.transportMode.label) route from the current position")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
             Spacer()
+            Picker("Mode", selection: $routePlanner.transportMode) {
+                ForEach(TransportMode.allCases.filter(\.isRoad), id: \.self) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 120)
             Button {
                 fly()
             } label: {
