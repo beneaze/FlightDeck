@@ -236,13 +236,18 @@ enum PFD {
     static let altTickLength: CGFloat = 1.0
     /// Where the scale's labels, and the target's value, start.
     static var altLabelX: CGFloat { altTape.minX + 0.45 }
+    /// Half the height of the readout's window over the tape.
+    static let altWindowHalfHeight: CGFloat = 2.83
+    /// The readout's large digits, right to left: hundreds, thousands,
+    /// ten-thousands, centred in fixed slots across the tape.
+    static func altDigitSlotX(_ index: Int) -> CGFloat {
+        altTape.maxX - 0.95 - CGFloat(index) * 2.85
+    }
     /// The level-off target box: about twice the readout window's height,
-    /// standing a little proud of the tape's inboard edge and reaching
-    /// about two fifths of the way across it, as measured off photos of
-    /// the real display.
+    /// standing a little proud of the tape's inboard edge, as measured off
+    /// pictures of the real display. Its width follows its value's digits.
     static let altTargetHalfHeight: CGFloat = 5.9
     static let altTargetOverhang: CGFloat = 0.9
-    static let altTargetWidth: CGFloat = 3.4
     static let altTargetNotch: CGFloat = 0.85
 
     /// The ground reference: a red ribbon in the strip just outboard of the

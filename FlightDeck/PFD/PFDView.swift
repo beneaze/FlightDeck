@@ -493,7 +493,7 @@ struct PFDView: View {
     /// The level-off target on the scale, as on the real PFD: a tall,
     /// narrow box over the inboard part of the tape, notched on its inboard
     /// edge where it points at the graduation, with the target's hundreds
-    /// in three digits where the scale's own labels sit — cyan for the FCU
+    /// in the scale's type on a black band — cyan for the FCU
     /// altitude, magenta for a constraint the managed climb or descent will
     /// level at. It is about twice the readout window's height, so level at
     /// the target its top and bottom stand clear above and below the
@@ -511,7 +511,12 @@ struct PFDView: View {
         ctx.clip(to: Path(CGRect(x: tape.minX - 2, y: tape.minY, width: tape.width + 2, height: tape.height)))
         let notch = PFD.altTargetNotch
         let left = tape.minX - PFD.altTargetOverhang
-        let right = tape.minX + PFD.altTargetWidth
+        // The value is right-aligned near the tape's outboard edge; the box
+        // ends just short of its thousands digit, so only a ten-thousands
+        // digit falls inside it.
+        let advance = Style.scaleType * 0.6
+        let valueRight = tape.maxX - 0.3
+        let right = valueRight - 2 * advance - 0.15
         var box = Path()
         box.move(to: CGPoint(x: left, y: ty - half))
         box.addLine(to: CGPoint(x: right, y: ty - half))
@@ -521,10 +526,19 @@ struct PFDView: View {
         box.addLine(to: CGPoint(x: left + notch, y: ty))
         box.addLine(to: CGPoint(x: left, y: ty - notch))
         box.closeSubpath()
+        // The value sits on a black band across the tape, the readout
+        // window's height, as the readout's digits do, so the graduations
+        // never print through it.
+        ctx.fill(Path(CGRect(x: tape.minX, y: ty - PFD.altWindowHalfHeight,
+                             width: tape.width, height: 2 * PFD.altWindowHalfHeight)),
+                 with: .color(EFIS.background))
         ctx.stroke(box, with: .color(color), lineWidth: Style.medium)
-        ctx.digits(String(format: "%03d", Int((abs(target.value) / 100).rounded())),
-                   at: CGPoint(x: PFD.altLabelX, y: ty), size: Style.scaleType, color,
-                   weight: .bold, anchor: .leading)
+
+        // The value in the scale's own type, hundreds of feet without
+        // leading zeros, right-aligned.
+        let hundreds = Int((abs(target.value) / 100).rounded())
+        ctx.digits("\(hundreds)", at: CGPoint(x: valueRight, y: ty),
+                   size: Style.scaleType, color, anchor: .trailing)
     }
 
     /// The yellow readout: hundreds of feet in large green digits over the
@@ -537,7 +551,8 @@ struct PFDView: View {
         // window outboard: the drum shows the neighbouring 20 ft values above
         // and below the current one.
         let tape = PFD.altTape
-        let digitWindow = CGRect(x: tape.minX, y: centerY - 2.83, width: tape.width, height: 5.66)
+        let digitWindow = CGRect(x: tape.minX, y: centerY - PFD.altWindowHalfHeight,
+                                 width: tape.width, height: 2 * PFD.altWindowHalfHeight)
         let drumWindow = CGRect(x: tape.maxX, y: centerY - 4.5, width: 5.6, height: 9.0)
 
         // Black fill behind the whole shape, so tape graduations never print
@@ -563,9 +578,8 @@ struct PFDView: View {
         let remainder = absoluteAltitude - Double(hundreds) * 100
 
         // Fixed digit slots, right to left: hundreds, thousands, ten-thousands.
-        let pitch: CGFloat = 2.85
         func slot(_ index: Int) -> CGPoint {
-            CGPoint(x: digitWindow.maxX - 0.95 - CGFloat(index) * pitch, y: centerY)
+            CGPoint(x: PFD.altDigitSlotX(index), y: centerY)
         }
         context.digits("\(hundreds % 10)", at: slot(0), size: Style.readoutType, EFIS.green, weight: .bold)
         if hundreds >= 10 {
