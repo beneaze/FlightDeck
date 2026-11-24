@@ -85,6 +85,12 @@ extension Double {
     }
 }
 
+extension Int {
+    func clamped(to range: ClosedRange<Int>) -> Int {
+        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
+    }
+}
+
 /// Wrap to 0..<360.
 func normalizedHeading(_ deg: Double) -> Double {
     let d = deg.truncatingRemainder(dividingBy: 360)

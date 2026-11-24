@@ -33,6 +33,15 @@ final class XPlaneNavData: @unchecked Sendable {
     private let root: URL
     private let lock = NSLock()
     private var fixes: [String: [Place]]?
+    /// The enroute fixes by position, for the ND's WPT option: built off
+    /// the main thread the first time they are asked for.
+    private var enrouteGrid: GeoGrid<EnrouteFix>?
+    private var isBuildingEnrouteGrid = false
+
+    struct EnrouteFix {
+        let ident: String
+        let coordinate: CLLocationCoordinate2D
+    }
 
     private struct Place {
         let latitude: Double
@@ -103,14 +112,14 @@ final class XPlaneNavData: @unchecked Sendable {
             try? fm.removeItem(at: staging)
             throw ImportError.copyFailed
         }
-        lock.lock(); fixes = nil; lock.unlock()
+        lock.lock(); fixes = nil; enrouteGrid = nil; isBuildingEnrouteGrid = false; lock.unlock()
         ProcedureDatabase.shared.reload()
         return airportCount
     }
 
     func remove() {
         try? FileManager.default.removeItem(at: root)
-        lock.lock(); fixes = nil; lock.unlock()
+        lock.lock(); fixes = nil; enrouteGrid = nil; isBuildingEnrouteGrid = false; lock.unlock()
         ProcedureDatabase.shared.reload()
     }
 
@@ -185,6 +194,43 @@ final class XPlaneNavData: @unchecked Sendable {
             ?? candidates.first { $0.region == region }
             ?? candidates.first
         return best.map { ($0.latitude, $0.longitude) }
+    }
+
+    /// The enroute fixes (earth_fix.dat) within `radiusNm` of a point.
+    /// Empty without imported data, and until the index is built: the
+    /// first call starts building it in the background.
+    func enrouteFixes(near point: CLLocationCoordinate2D, withinNm radiusNm: Double) -> [EnrouteFix] {
+        lock.lock()
+        if let grid = enrouteGrid {
+            lock.unlock()
+            return grid.items(near: point, withinNm: radiusNm)
+        }
+        let start = !isBuildingEnrouteGrid && isInstalled
+        if start { isBuildingEnrouteGrid = true }
+        lock.unlock()
+        if start {
+            DispatchQueue.global(qos: .utility).async {
+                let grid = GeoGrid(self.loadEnrouteFixes(), coordinate: \.coordinate)
+                self.lock.lock()
+                self.enrouteGrid = grid
+                self.isBuildingEnrouteGrid = false
+                self.lock.unlock()
+            }
+        }
+        return []
+    }
+
+    private func loadEnrouteFixes() -> [EnrouteFix] {
+        guard let text = try? String(contentsOf: root.appendingPathComponent("earth_fix.dat"), encoding: .utf8)
+        else { return [] }
+        var result: [EnrouteFix] = []
+        for line in text.split(whereSeparator: \.isNewline) {
+            let p = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard p.count >= 5, p[3] == "ENRT", let lat = Double(p[0]), let lon = Double(p[1]) else { continue }
+            result.append(EnrouteFix(ident: String(p[2]),
+                                     coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon)))
+        }
+        return result
     }
 
     /// Every fix (earth_fix.dat) and radio navaid (earth_nav.dat: NDB 2,

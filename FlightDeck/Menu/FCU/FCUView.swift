@@ -86,7 +86,7 @@ struct FCUView: View {
             autoFlight: flightData.autoFlight,
             selectedAltitudeFt: flightData.selectedAltitudeFt,
             speedUnit: flightData.speedUnit,
-            isStandardBaro: flightData.isStandardBaro,
+            baro: flightData.baro,
             boeingHeadingDeg: Int(normalizedHeading((flightData.autoFlight.headingTargetDeg
                                                       ?? flightData.headingDeg).rounded())) % 360,
             courseDeg: course.map { Int(normalizedHeading($0.rounded())) % 360 })
@@ -110,13 +110,14 @@ struct FCUReadout: Equatable {
     var autoFlight: AutoFlight
     var selectedAltitudeFt: Double
     var speedUnit: SpeedUnit
-    var isStandardBaro: Bool
+    var baro: BaroSetting
     /// The 737 HEADING window: the bug once set, else the present heading.
     var boeingHeadingDeg: Int
     /// The 737 COURSE windows: the route's course, when there is one.
     var courseDeg: Int?
 
     var af: AutoFlight { autoFlight }
+    var isStandardBaro: Bool { baro.isStandard }
 
     /// Selected speed in the display unit.
     var selectedSpeed: Int? {
@@ -288,7 +289,66 @@ struct FCUControls {
     func toggleLandingSystem() { update { $0.landingSystem.toggle() } }
     func toggleTerrain() { update { $0.terrainOnND.toggle() } }
 
-    /// Baro reference: STD or QNH.
-    func setStandardBaro(_ standard: Bool) { flightData.isStandardBaro = standard }
-    func toggleStandardBaro() { flightData.isStandardBaro.toggle() }
+    // MARK: Baro
+
+    /// Baro knob turned: the QNH moves by 1 hPa or 0.01 inHg a detent;
+    /// in STD the turn preselects the QNH the next push sets.
+    func turnBaro(_ steps: Int) {
+        var b = flightData.baro
+        if b.isStandard {
+            b.preselectHpa = b.turned(b.preselectHpa ?? b.hpa, by: steps)
+        } else {
+            b.hpa = b.turned(b.hpa, by: steps)
+        }
+        flightData.baro = b
+    }
+
+    /// Pushed: QNH — the preselected value if there is one, else the last.
+    func pushBaro() {
+        var b = flightData.baro
+        if let preselect = b.preselectHpa { b.hpa = preselect }
+        b.preselectHpa = nil
+        b.isStandard = false
+        flightData.baro = b
+    }
+
+    /// Pulled: STD.
+    func pullBaro() {
+        var b = flightData.baro
+        b.isStandard = true
+        b.preselectHpa = nil
+        flightData.baro = b
+    }
+
+    /// The 737's STD button in the BARO knob's centre.
+    func toggleStandardBaro() {
+        if flightData.baro.isStandard { pushBaro() } else { pullBaro() }
+    }
+
+    /// The baro knob's outer ring: inHg or hPa.
+    func setBaroUnit(inHg: Bool) { flightData.baro = flightData.baro.withUnit(inHg: inHg) }
+
+    // MARK: ND
+
+    /// The mode selector, one position a detent, stopping at LS and PLAN.
+    func turnNDMode(_ steps: Int) {
+        let next = (af.ndMode.rawValue + steps).clamped(to: 0...(NDMode.allCases.count - 1))
+        setNDMode(NDMode(rawValue: next) ?? .arc)
+    }
+
+    func setNDMode(_ mode: NDMode) { update { $0.ndMode = mode } }
+
+    /// The range selector, one range a detent.
+    func turnNDRange(_ steps: Int) { setNDRange(af.ndRangeIndex + steps) }
+
+    func setNDRange(_ index: Int) {
+        let ranges = AircraftProfile.a320.ndRangesNm
+        update { $0.ndRangeIndex = index.clamped(to: 0...(ranges.count - 1)) }
+    }
+
+    /// The map options light one at a time: pressing another moves the
+    /// light to it, pressing the lit one puts it out.
+    func toggleNDOption(_ option: NDOption) {
+        update { $0.ndOption = $0.ndOption == option ? nil : option }
+    }
 }

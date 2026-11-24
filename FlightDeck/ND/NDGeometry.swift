@@ -186,6 +186,106 @@ enum ND {
     static let runwayCentrelineDash: [CGFloat] = [14, 12]
 }
 
+/// Where the compass rose sits in each mode, in the canvas units of ``ND``.
+///
+/// ARC keeps the fixed layout above: the rose centre low on the canvas, the
+/// aircraft just under it, the ring standing for the selected range. ROSE
+/// and PLAN draw the full circle in the middle of the display, as large as
+/// the display's height (or width) allows with the rose labels outside it;
+/// there the ring stands for half the selected range, as on the real ND.
+/// The type sizes are the same in every mode.
+struct NDLayout {
+    let mode: NDMode
+    /// Centre of the rose and of the range rings.
+    let center: CGPoint
+    let ringRadius: CGFloat
+    /// The aircraft symbol: under the rose centre in ARC, on it in ROSE. In
+    /// PLAN the aircraft is drawn where it is on the map instead.
+    let planeCenter: CGPoint
+    /// The map radius standing for ``NDView``'s map range.
+    let mapRadius: CGFloat
+
+    /// The rose's graduations and labels. ARC uses the fixed sizes of
+    /// ``ND``; the full rose keeps the real display's proportions to its
+    /// ring: short graduations, the labels every 30°, the cardinal ones
+    /// large.
+    let majorTick: CGFloat
+    let minorTick: CGFloat
+    let labelGap: CGFloat
+    let labelLarge: CGFloat
+    let labelSmall: CGFloat
+
+    /// The full rose's proportions, as fractions of its ring radius.
+    private enum Rose {
+        static let majorTick: CGFloat = 0.065
+        static let minorTick: CGFloat = 0.035
+        static let labelGap: CGFloat = 0.03
+        static let labelLarge: CGFloat = 0.15
+        static let labelSmall: CGFloat = 0.105
+        /// Room outside the labels.
+        static let margin: CGFloat = 10
+    }
+
+    init(mode: NDMode, bounds: CGRect) {
+        self.mode = mode
+        if mode == .arc {
+            center = ND.center
+            ringRadius = ND.ringRadius
+            planeCenter = ND.planeCenter
+            mapRadius = ND.mapRadius
+            majorTick = ND.majorTick
+            minorTick = ND.minorTick
+            labelGap = ND.labelGap
+            labelLarge = ND.roseLabelLarge
+            labelSmall = ND.roseLabelSmall
+        } else {
+            // Ring, graduations and labels together fill the shorter side.
+            let half = min(bounds.width, bounds.height) / 2 - Rose.margin
+            let r = max(150, half / (1 + Rose.majorTick + Rose.labelGap + Rose.labelLarge))
+            center = CGPoint(x: bounds.midX, y: bounds.midY)
+            ringRadius = r
+            planeCenter = center
+            mapRadius = r
+            majorTick = r * Rose.majorTick
+            minorTick = r * Rose.minorTick
+            labelGap = r * Rose.labelGap
+            labelLarge = r * Rose.labelLarge
+            labelSmall = r * Rose.labelSmall
+        }
+    }
+
+    var isArc: Bool { mode == .arc }
+
+    /// Point at a bearing (degrees clockwise from straight up) and radius
+    /// from the rose centre.
+    func point(bearingDeg: Double, radius: CGFloat) -> CGPoint {
+        let a = bearingDeg * .pi / 180
+        return CGPoint(x: center.x + radius * CGFloat(sin(a)), y: center.y - radius * CGFloat(cos(a)))
+    }
+
+    var labelRadius: CGFloat { ringRadius + majorTick + labelGap + labelLarge / 2 }
+
+    /// The deviation scale's dot spacing in ROSE LS and VOR: two dots out
+    /// reach the inner range ring.
+    var dotSpacing: CGFloat { ringRadius / 4 }
+
+    /// The ring circle, which clips the map and terrain in ROSE.
+    var ringPath: Path {
+        Path(ellipseIn: CGRect(x: center.x - ringRadius, y: center.y - ringRadius,
+                               width: 2 * ringRadius, height: 2 * ringRadius))
+    }
+
+    /// The map's region: under the arc in ARC, inside the ring in ROSE, the
+    /// whole display in PLAN.
+    func mapClip(in bounds: CGRect) -> Path {
+        switch mode {
+        case .arc: return ND.mapClip(in: bounds)
+        case .plan: return Path(bounds)
+        default: return ringPath
+        }
+    }
+}
+
 /// Maps geographic positions onto the ND's ARC-mode canvas.
 ///
 /// In ARC mode the aircraft sits near the bottom edge, `radius` represents the

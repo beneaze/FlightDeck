@@ -122,8 +122,13 @@ final class FlightDataModel: NSObject, ObservableObject {
     @Published var selectedAltitudeFt: Double = 3_000
     /// The rest of the FCU / MCP: speed, heading, V/S, FD, AP, approach.
     @Published var autoFlight = AutoFlight()
+    /// The EFIS panel's baro reference: STD or QNH, its value and unit.
+    @Published var baro = BaroSetting()
     /// True while the baro reference is STD (above transition altitude).
-    @Published var isStandardBaro: Bool = true
+    var isStandardBaro: Bool {
+        get { baro.isStandard }
+        set { baro.isStandard = newValue }
+    }
 
     /// True while a calibration pose is active — pitch and roll are then
     /// measured relative to it rather than to a vertical phone.

@@ -53,6 +53,10 @@ struct Navaid: Hashable {
             case .dme: return "DME"
             }
         }
+
+        var isNDB: Bool { self == .ndb || self == .ndbDme }
+        /// Carries a VOR: what ROSE VOR can show a course from.
+        var isVOR: Bool { self == .vor || self == .vorDme || self == .vortac }
     }
 
     let ident: String
@@ -84,6 +88,8 @@ final class NavDatabase: @unchecked Sendable {
 
     private let runwaysByAirport: [String: [Runway]]
     private let navaidsByIdent: [String: [Navaid]]
+    /// The navaids by 1° square, for the ND's map options.
+    private let navaidGrid: GeoGrid<Navaid>
 
     private init() {
         var runways: [String: [Runway]] = [:]
@@ -121,6 +127,12 @@ final class NavDatabase: @unchecked Sendable {
             }
         }
         navaidsByIdent = navaids
+        navaidGrid = GeoGrid(navaids.values.joined(), coordinate: \.coordinate)
+    }
+
+    /// The navaids within `radiusNm` of a point.
+    func navaids(near point: CLLocationCoordinate2D, withinNm radiusNm: Double) -> [Navaid] {
+        navaidGrid.items(near: point, withinNm: radiusNm)
     }
 
     /// The runway ends of an airport, longest runways first.
@@ -201,5 +213,40 @@ final class NavDatabase: @unchecked Sendable {
     static func coordinateIdent(_ c: CLLocationCoordinate2D) -> String {
         String(format: "%@%02d%@%03d", c.latitude >= 0 ? "N" : "S", Int(abs(c.latitude)),
                c.longitude >= 0 ? "E" : "W", Int(abs(c.longitude)))
+    }
+}
+
+/// Items filed by 1° square of latitude and longitude, for finding the
+/// ones near a point without measuring the distance to every one.
+struct GeoGrid<Item> {
+    private var cells: [Int: [Item]] = [:]
+    private let coordinate: (Item) -> CLLocationCoordinate2D
+
+    init<S: Sequence>(_ items: S, coordinate: @escaping (Item) -> CLLocationCoordinate2D) where S.Element == Item {
+        self.coordinate = coordinate
+        for item in items {
+            let c = coordinate(item)
+            cells[Self.cell(Int(floor(c.latitude)), Int(floor(c.longitude))), default: []].append(item)
+        }
+    }
+
+    private static func cell(_ lat: Int, _ lon: Int) -> Int {
+        (lat + 90) * 360 + ((lon + 180) % 360 + 360) % 360
+    }
+
+    func items(near point: CLLocationCoordinate2D, withinNm radiusNm: Double) -> [Item] {
+        let latSpan = Int(ceil(radiusNm / 60)) + 1
+        let lonSpan = min(180, Int(ceil(radiusNm / (60 * max(0.05, cos(point.latitude * .pi / 180))))) + 1)
+        let baseLat = Int(floor(point.latitude)), baseLon = Int(floor(point.longitude))
+        var result: [Item] = []
+        for lat in (baseLat - latSpan)...(baseLat + latSpan) where (-90..<90).contains(lat) {
+            for lon in (baseLon - lonSpan)...(baseLon + lonSpan) {
+                for item in cells[Self.cell(lat, lon)] ?? []
+                where GreatCircle.distanceNm(point, coordinate(item)) <= radiusNm {
+                    result.append(item)
+                }
+            }
+        }
+        return result
     }
 }

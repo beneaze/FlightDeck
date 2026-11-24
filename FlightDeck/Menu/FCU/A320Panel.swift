@@ -27,12 +27,17 @@ struct A320Panel: View, Equatable {
     private static let rowGap: CGFloat = 10
     private static let margin: CGFloat = 4
 
+    private static let terrainPlateWidth: CGFloat = 120
+    private static let terrainPlateHeight: CGFloat = 46
+
     static func size(landscape: Bool) -> CGSize {
         if landscape {
             let fcu = speedWidth + headingWidth + centerWidth + verticalWidth
-            return CGSize(width: efisWidth + unitGap + fcu + 2 * margin, height: height + 2 * margin)
+            return CGSize(width: efisWidth + unitGap + fcu + 2 * margin,
+                          height: height + rowGap + terrainPlateHeight + 2 * margin)
         }
-        return CGSize(width: verticalWidth + 2 * margin, height: 3 * height + 2 * rowGap + 2 * margin)
+        return CGSize(width: verticalWidth + 2 * margin,
+                      height: 3 * height + 3 * rowGap + terrainPlateHeight + 2 * margin)
     }
 
     private var af: AutoFlight { readout.af }
@@ -72,13 +77,17 @@ struct A320Panel: View, Equatable {
     var body: some View {
         Group {
             if landscape {
-                HStack(spacing: Self.unitGap) {
-                    efis.fcuPlate(boeing: false)
-                    HStack(spacing: 0) { speed; heading; center; vertical }
-                        .fcuPlate(boeing: false)
+                VStack(alignment: .leading, spacing: Self.rowGap) {
+                    HStack(spacing: Self.unitGap) {
+                        efis.fcuPlate(boeing: false)
+                        HStack(spacing: 0) { speed; heading; center; vertical }
+                            .fcuPlate(boeing: false)
+                    }
+                    terrainPlate.fcuPlate(boeing: false)
+                        .frame(width: Self.efisWidth)
                 }
             } else {
-                VStack(spacing: Self.rowGap) {
+                VStack(alignment: .leading, spacing: Self.rowGap) {
                     HStack(spacing: Self.rowGap) {
                         efis.fcuPlate(boeing: false)
                         speed.frame(width: Self.verticalWidth - Self.efisWidth - Self.rowGap)
@@ -88,6 +97,8 @@ struct A320Panel: View, Equatable {
                         .frame(width: Self.verticalWidth)
                         .fcuPlate(boeing: false)
                     vertical.fcuPlate(boeing: false)
+                    terrainPlate.fcuPlate(boeing: false)
+                        .frame(width: Self.efisWidth)
                 }
             }
         }
@@ -97,28 +108,22 @@ struct A320Panel: View, Equatable {
     // MARK: - EFIS control panel (captain)
 
     /// Laid out as the real panel: the baro window over the baro knob
-    /// (pull for STD, push for QNH, in its inHg / hPa ring) with FD and LS
-    /// under it; across the top the map options (here TERR ON ND, the one
-    /// that does something), then the ND mode and range selectors over the
-    /// ADF / VOR switches. The ND has its own range keys and shows its own
-    /// map, so the selectors and switches are drawn but inert.
+    /// (turn to set, pull for STD, push for QNH, its outer ring at inHg or
+    /// hPa) with FD and LS under it; across the top the five map options,
+    /// then the ND mode and range selectors over the ADF / VOR switches.
+    /// There are no radios to point at, so the ADF / VOR switches are drawn
+    /// but inert.
     private var efis: some View {
-        PanelBlock(width: Self.efisWidth, height: Self.height) {
-            LCDWindow(width: 72, height: 34) {
-                PanelBlock(width: 72, height: 34) {
-                    LCDLabel(text: "QNH", lit: !readout.isStandardBaro, size: 7).position(x: 36, y: 7)
-                    let text = readout.isStandardBaro ? "Std" : "1013"
-                    SegmentText(text: text, cells: text.count, height: 17, color: FCUColors.airbusDigits, ghost: Self.ghost)
-                        .position(x: 36, y: 22)
-                }
-            }
-            .position(x: 50, y: 30)
+        let baro = readout.baro
+        return PanelBlock(width: Self.efisWidth, height: Self.height) {
+            baroWindow(baro).position(x: 50, y: 30)
             printedArc(center: CGPoint(x: 50, y: 106), radius: 33, from: -42, to: 42)
-            FCULegend("in Hg", size: 7.5).position(x: 18, y: 70)
-            FCULegend("hPa", size: 7.5).position(x: 84, y: 70)
-            FCUTurnable(onTurn: { _ in }, onPush: { c.setStandardBaro(false) }, onPull: { c.setStandardBaro(true) }) { t in
-                // The ring's dot at hPa, as the window reads.
-                AirbusKnob(kind: .baro, diameter: 56, turns: t, selectorAngle: 40)
+            baroUnitButton("in Hg", inHg: true).position(x: 18, y: 70)
+            baroUnitButton("hPa", inHg: false).position(x: 84, y: 70)
+            FCUTurnable(onTurn: c.turnBaro, onPush: c.pushBaro, onPull: c.pullBaro) { t in
+                // The ring's dot at the unit the window reads.
+                AirbusKnob(kind: .baro, diameter: 56, turns: t, selectorAngle: baro.inHg ? -40 : 40)
+                    .animation(.easeOut(duration: 0.15), value: baro.inHg)
             }
             .position(x: 50, y: 112)
             AirbusPushbutton(legend: "FD", lit: af.flightDirector, width: 40, height: 26, action: c.toggleFlightDirector)
@@ -127,22 +132,85 @@ struct A320Panel: View, Equatable {
                 .position(x: 74, y: 176)
             Rectangle().fill(FCUColors.airbusLegend.opacity(0.9)).frame(width: 1.4, height: 112).position(x: 98, y: 134)
 
-            AirbusPushbutton(legend: "TERR ON ND", lit: af.terrainOnND, width: 92, height: 26, fontSize: 9,
-                             action: c.toggleTerrain)
-                .position(x: 172, y: 24)
+            ForEach(Array(NDOption.allCases.enumerated()), id: \.offset) { i, option in
+                AirbusPushbutton(legend: option.legend, lit: af.ndOption == option, width: 25, height: 24,
+                                 fontSize: 6, action: { c.toggleNDOption(option) })
+                    .position(x: 113 + CGFloat(i) * 28, y: 22)
+            }
 
-            AirbusSelector(labels: ["LS", "VOR", "NAV", "ARC", "PLAN"], angles: fcuArc(5, from: -95, to: 95),
-                           pointer: 47.5, diameter: 36, labelRadius: 28, labelSize: 7.5)
-                .position(x: 134, y: 98)
-            AirbusSelector(labels: ["10", "20", "40", "80", "160", "320"], angles: fcuArc(6, from: -110, to: 110),
-                           pointer: -22, diameter: 36, labelRadius: 28, labelSize: 7.5)
-                .position(x: 204, y: 98)
+            // The range selector first, so the mode selector's PLAN, which
+            // reaches over towards it, takes the taps on top.
+            FCUTurnable(stepPoints: 18, onTurn: c.turnNDRange) { _ in
+                AirbusSelector(labels: Self.rangeLabels.map { String(Int($0)) }, angles: Self.rangeAngles,
+                               pointer: rangePointer, diameter: 36, labelRadius: 28, labelSize: 7.5,
+                               onSelect: { i in
+                                   let ranges = AircraftProfile.a320.ndRangesNm
+                                   if let index = ranges.firstIndex(of: Self.rangeLabels[i]) { c.setNDRange(index) }
+                               })
+                    .animation(.easeOut(duration: 0.15), value: af.ndRangeIndex)
+            }
+            .position(x: 204, y: 98)
+            FCUTurnable(stepPoints: 18, onTurn: c.turnNDMode) { _ in
+                AirbusSelector(labels: ["LS", "VOR", "NAV", "ARC", "PLAN"], angles: Self.modeAngles,
+                               pointer: Self.modeAngles[af.ndMode.rawValue], diameter: 36, labelRadius: 28,
+                               labelSize: 7.5, onSelect: { c.setNDMode(NDMode(rawValue: $0) ?? .arc) })
+                    .animation(.easeOut(duration: 0.15), value: af.ndMode)
+            }
+            .position(x: 134, y: 98)
             ForEach([134.0, 204.0], id: \.self) { x in
                 FCULegend("ADF", size: 7).position(x: x - 21, y: 166)
                 FCULegend("VOR", size: 7).position(x: x + 22, y: 166)
                 AirbusBallSwitch(diameter: 20).position(x: x, y: 166)
                 FCULegend("OFF", size: 7).position(x: x, y: 184)
             }
+        }
+    }
+
+    /// The baro window: QNH lit over the setting — four digits in hPa,
+    /// 29.92 in inHg — or Std.
+    private func baroWindow(_ baro: BaroSetting) -> some View {
+        let text = baro.isStandard ? "Std" : baro.valueText.replacingOccurrences(of: ".", with: "")
+        return LCDWindow(width: 72, height: 34) {
+            PanelBlock(width: 72, height: 34) {
+                LCDLabel(text: "QNH", lit: !baro.isStandard, size: 7).position(x: 36, y: 7)
+                SegmentText(text: text, cells: 4, height: 17, color: FCUColors.airbusDigits, ghost: Self.ghost,
+                            point: !baro.isStandard && baro.inHg ? 1 : nil)
+                    .position(x: 36, y: 22)
+            }
+        }
+    }
+
+    /// The outer ring's legends: tap one to turn the ring's dot to it.
+    private func baroUnitButton(_ label: String, inHg: Bool) -> some View {
+        Button { c.setBaroUnit(inHg: inHg) } label: {
+            FCULegend(label, size: 7.5)
+                .frame(width: 30, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private static let modeAngles = fcuArc(5, from: -95, to: 95)
+    /// The range selector's positions. The ND's own range keys go on below
+    /// 10 NM, to street scale; the pointer then rests at 10.
+    private static let rangeLabels: [Double] = [10, 20, 40, 80, 160, 320]
+    private static let rangeAngles = fcuArc(6, from: -110, to: 110)
+
+    private var rangePointer: Double {
+        let ranges = AircraftProfile.a320.ndRangesNm
+        let range = ranges[af.ndRangeIndex.clamped(to: 0...(ranges.count - 1))]
+        let i = Self.rangeLabels.lastIndex { $0 <= range } ?? 0
+        return Self.rangeAngles[i]
+    }
+
+    /// TERR ON ND is not on the glareshield: on the aircraft it sits on
+    /// the main instrument panel by the ND. Here it gets a small plate of
+    /// its own under the EFIS panel.
+    private var terrainPlate: some View {
+        PanelBlock(width: Self.terrainPlateWidth, height: Self.terrainPlateHeight) {
+            AirbusPushbutton(legend: "TERR ON ND", lit: af.terrainOnND, width: 92, height: 30, fontSize: 9,
+                             action: c.toggleTerrain)
+                .position(x: Self.terrainPlateWidth / 2, y: Self.terrainPlateHeight / 2)
         }
     }
 

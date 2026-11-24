@@ -244,9 +244,10 @@ struct B737Panel: View, Equatable {
 
     // MARK: - EFIS control panel (captain)
 
-    /// MINS, BARO (push its centre for STD), the ND mode and range
-    /// selectors and the map buttons. TERR is wired; the ND has its own
-    /// range keys and shows its map, so the rest are drawn but inert.
+    /// MINS, BARO (turn to set, push its centre for STD), the ND mode and
+    /// range selectors and the map buttons. BARO and TERR are wired; the ND
+    /// has its own range keys and shows its map, so the rest are drawn but
+    /// inert.
     private var efis: some View {
         let keys = ["WXR", "STA", "WPT", "ARPT", "DATA", "POS", "TERR"]
         return PanelBlock(width: Self.efisWidth, height: Self.height) {
@@ -263,7 +264,7 @@ struct B737Panel: View, Equatable {
             legend("BARO", size: 8).position(x: 245, y: 12)
             legend("IN", size: 6.5).position(x: 218, y: 30)
             legend("HPA", size: 6.5).position(x: 274, y: 30)
-            FCUTurnable(onTurn: { _ in }, onPush: c.toggleStandardBaro) { t in
+            FCUTurnable(onTurn: c.turnBaro, onPush: c.toggleStandardBaro) { t in
                 BoeingSelector(diameter: 36, labelRadius: 20, center: "STD", lit: readout.isStandardBaro, turns: t)
             }
             .position(x: 245, y: 54)

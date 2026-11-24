@@ -184,13 +184,16 @@ struct FCULegend: View {
 /// '-', '+', ' ', the small raised 'o' of the Airbus V/S window, and the
 /// few letters "Std" needs. The text is right-aligned in `cells` places.
 /// `ghost` draws every segment of every cell faintly underneath, as the
-/// unlit segments of a real LCD show against its glass.
+/// unlit segments of a real LCD show against its glass. `point` lights
+/// the decimal point after that cell (counted from the left), as the
+/// baro window's 29.92.
 struct SegmentText: View {
     let text: String
     var cells: Int
     var height: CGFloat
     var color: Color
     var ghost: Double = 0
+    var point: Int? = nil
 
     private var cellWidth: CGFloat { height * 0.5 }
     private var gap: CGFloat { height * 0.17 }
@@ -219,6 +222,12 @@ struct SegmentText: View {
                     for path in Self.paths(for: ch, x: x, w: cellWidth, h: height) {
                         ctx.fill(path, with: .color(color))
                     }
+                }
+                if let point {
+                    let side = height * 0.12
+                    let x = CGFloat(point + 1) * (cellWidth + gap) - gap / 2
+                    ctx.fill(Path(CGRect(x: x - side / 2, y: height - side, width: side, height: side)),
+                             with: .color(color))
                 }
             }
             // The glow: tight around the segments, then a soft bloom.
@@ -694,6 +703,8 @@ struct AirbusSelector: View {
     var diameter: CGFloat = 30
     var labelRadius: CGFloat = 26
     var labelSize: CGFloat = 7
+    /// Tapping a position's label turns the selector to it.
+    var onSelect: ((Int) -> Void)? = nil
 
     var body: some View {
         let d = diameter
@@ -759,11 +770,29 @@ struct AirbusSelector: View {
             .frame(width: labelRadius * 2 + 30, height: labelRadius * 2 + 20)
             ForEach(labels.indices, id: \.self) { i in
                 let a = angles[i] * .pi / 180
-                FCULegend(labels[i], size: labelSize)
+                label(i)
                     .offset(x: CGFloat(sin(a)) * labelRadius, y: -CGFloat(cos(a)) * labelRadius)
             }
         }
         .frame(width: labelRadius * 2 + 30, height: labelRadius * 2 + 20)
+    }
+}
+
+extension AirbusSelector {
+    @ViewBuilder fileprivate func label(_ i: Int) -> some View {
+        if let onSelect {
+            Button {
+                UISelectionFeedbackGenerator().selectionChanged()
+                onSelect(i)
+            } label: {
+                FCULegend(labels[i], size: labelSize)
+                    .padding(.horizontal, 3).padding(.vertical, 2)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        } else {
+            FCULegend(labels[i], size: labelSize)
+        }
     }
 }
 

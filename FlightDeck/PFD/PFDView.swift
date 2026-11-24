@@ -795,8 +795,10 @@ struct PFDView: View {
         }
         let locDeviation = (guidance.localizerError / 10).clamped(to: -1...1)
         drawDiamond(context, at: CGPoint(x: center.x + CGFloat(locDeviation) * 2 * spacing, y: locY))
+        // The diamond shows where the path is: below the centre with the
+        // aircraft above it.
         if let deviation = glideDeviation {
-            drawDiamond(context, at: CGPoint(x: gsX, y: center.y - CGFloat(deviation) * 2 * spacing))
+            drawDiamond(context, at: CGPoint(x: gsX, y: center.y + CGFloat(deviation) * 2 * spacing))
         }
     }
 
@@ -846,20 +848,13 @@ struct PFDView: View {
             let text = flightData.isStandardBaro
                 ? "FL" + String(format: "%03d", Int((target.value / 100).rounded()))
                 : "\(Int(target.value.rounded()))"
-            context.digits(text, at: CGPoint(x: alt.midX + 1.9, y: offset > 0 ? above : alt.maxY + 2.4),
+            context.digits(text, at: CGPoint(x: alt.midX + 1.9, y: offset > 0 ? above : alt.maxY + 2.6),
                            size: 4.15, target.isManaged ? EFIS.magenta : EFIS.cyan, weight: .bold)
         }
 
-        // The baro reference, under the place the target takes below the tape.
-        let baroY = alt.maxY + 6.6
-        if flightData.isStandardBaro {
-            context.digits("STD", at: CGPoint(x: alt.midX + 1.9, y: baroY), size: Style.annunciationType,
-                           EFIS.cyan, weight: .bold)
-        } else {
-            context.digits("QNH", at: CGPoint(x: alt.midX - 2.5, y: baroY), size: 3.8, .white)
-            context.digits("1013", at: CGPoint(x: alt.midX + 5, y: baroY), size: Style.annunciationType,
-                           EFIS.cyan, weight: .bold)
-        }
+        // Clear of the target below the tape, with room for a preselected
+        // QNH under STD.
+        drawBaroReference(context, y: alt.maxY + 8.4)
 
         // Destination block, in the slot the ILS identifier occupies.
         if let destination = routePlanner.destination {
@@ -872,6 +867,37 @@ struct PFDView: View {
                                at: CGPoint(x: x, y: top + 4.4), size: 3.8, EFIS.magenta,
                                weight: .bold, anchor: .leading)
             }
+        }
+    }
+
+    /// The baro reference under the altitude tape, under the place the
+    /// level-off target takes. STD: cyan in a yellow box, with a QNH
+    /// preselected meanwhile small in cyan under it. QNH: the white label
+    /// and the setting in cyan beside it, the two centred as one line.
+    private func drawBaroReference(_ context: GraphicsContext, y: CGFloat) {
+        let baro = flightData.baro
+        let x = PFD.altTape.midX + 1.9
+        let size = Style.annunciationType
+        // The display face is monospaced, its advance 0.6 of the size.
+        func width(_ text: String, _ size: CGFloat) -> CGFloat { CGFloat(text.count) * size * 0.6 }
+
+        if baro.isStandard {
+            let box = CGRect(x: x - width("STD", size) / 2 - 0.9, y: y - size * 0.66,
+                             width: width("STD", size) + 1.8, height: size * 1.32)
+            context.stroke(Path(box), with: .color(EFIS.yellow), lineWidth: Style.medium)
+            context.digits("STD", at: CGPoint(x: x, y: y), size: size, EFIS.cyan, weight: .bold)
+            if let preselect = baro.preselectHpa {
+                context.digits(baro.text(preselect), at: CGPoint(x: x, y: box.maxY + 2.9), size: 3.3,
+                               EFIS.cyan, weight: .bold)
+            }
+        } else {
+            let label = "QNH", value = baro.valueText, gap: CGFloat = 1.1
+            let labelSize: CGFloat = 3.6
+            let total = width(label, labelSize) + gap + width(value, size)
+            let left = x - total / 2
+            context.digits(label, at: CGPoint(x: left, y: y), size: labelSize, .white, anchor: .leading)
+            context.digits(value, at: CGPoint(x: left + width(label, labelSize) + gap, y: y), size: size,
+                           EFIS.cyan, weight: .bold, anchor: .leading)
         }
     }
 

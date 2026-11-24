@@ -130,10 +130,11 @@ final class NDTerrainLayer: ObservableObject {
     }
 
     /// Draw the terrain under the map, inside the compass ring (`clipCenter`,
-    /// `clipRadius`) and ahead of `sweepOrigin` — the aircraft — with the
-    /// sweep in progress.
+    /// `clipRadius`) and, in ARC, ahead of `sweepOrigin` — the aircraft —
+    /// with the sweep in progress. In ROSE (`aheadOnly` false) the terrain
+    /// shows all round and the sweep runs on round to the tail.
     func draw(in context: GraphicsContext, geometry g: NDGeometry,
-              clipCenter: CGPoint, clipRadius: CGFloat, sweepOrigin: CGPoint) {
+              clipCenter: CGPoint, clipRadius: CGFloat, sweepOrigin: CGPoint, aheadOnly: Bool = true) {
         guard g.rangeNm == rangeNm else { return }
         // The map's size on the screen, for the next picture's resolution.
         let t = context.transform
@@ -143,10 +144,12 @@ final class NDTerrainLayer: ObservableObject {
         var ctx = context
         ctx.clip(to: Path(ellipseIn: CGRect(x: clipCenter.x - clipRadius, y: clipCenter.y - clipRadius,
                                             width: 2 * clipRadius, height: 2 * clipRadius)))
-        // Terrain is shown ahead of the aircraft only.
+        // In ARC terrain is shown ahead of the aircraft only.
         let top = clipCenter.y - 2 * clipRadius
-        ctx.clip(to: Path(CGRect(x: clipCenter.x - 2 * clipRadius, y: top,
-                                 width: 4 * clipRadius, height: sweepOrigin.y - top)))
+        if aheadOnly {
+            ctx.clip(to: Path(CGRect(x: clipCenter.x - 2 * clipRadius, y: top,
+                                     width: 4 * clipRadius, height: sweepOrigin.y - top)))
+        }
 
         // The pictures to show and where: the painted one alone, or during a
         // sweep the new one inside the swept wedge and the painted one
@@ -155,7 +158,8 @@ final class NDTerrainLayer: ObservableObject {
         if let sweep = sweeping {
             // Half-angle the sweep has reached either side of straight ahead.
             let progress = min(1, Date().timeIntervalSince(sweep.start) / Self.sweepDuration)
-            let wedge = Self.wedge(origin: sweepOrigin, halfAngleDeg: 90 * progress, radius: 4 * clipRadius)
+            let wedge = Self.wedge(origin: sweepOrigin, halfAngleDeg: (aheadOnly ? 90 : 180) * progress,
+                                   radius: 4 * clipRadius)
             if let painted {
                 var outside = Path(CGRect(x: clipCenter.x - 2 * clipRadius, y: top,
                                           width: 4 * clipRadius, height: 4 * clipRadius))

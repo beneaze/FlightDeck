@@ -293,7 +293,7 @@ struct BoeingPFDView: View {
         let loc = (guidance.localizerError / 10).clamped(to: -1...1)
         drawDiamond(context, at: CGPoint(x: c.x + CGFloat(loc) * 2 * spacing, y: locY))
         if let deviation = guidance.glideDeviation {
-            drawDiamond(context, at: CGPoint(x: gsX, y: B737PFD.tapeCenterY - CGFloat(deviation) * 2 * spacing))
+            drawDiamond(context, at: CGPoint(x: gsX, y: B737PFD.tapeCenterY + CGFloat(deviation) * 2 * spacing))
         }
     }
 
@@ -517,13 +517,19 @@ struct BoeingPFDView: View {
                            at: CGPoint(x: tape.midX + 3.1, y: B737PFD.tapeTop - 3.6),
                            size: Style.target, Boeing.magenta)
         let baroY = tape.maxY + 5.0
-        if flightData.isStandardBaro {
+        let baro = flightData.baro
+        if baro.isStandard {
             context.boeingText("STD", at: CGPoint(x: tape.midX, y: baroY), size: 4.1, Boeing.green)
+            // A setting preselected in STD, small under it.
+            if let preselect = baro.preselectHpa {
+                context.boeingText(baro.text(preselect) + (baro.inHg ? " IN" : " HPA"),
+                                   at: CGPoint(x: tape.midX, y: baroY + 4.2), size: Style.small, .white)
+            }
         } else {
-            context.boeingText("1013", at: CGPoint(x: tape.midX - 0.4, y: baroY), size: 4.1, Boeing.green,
+            context.boeingText(baro.valueText, at: CGPoint(x: tape.midX - 0.4, y: baroY), size: 4.1, Boeing.green,
                                anchor: .trailing)
-            context.boeingText("HPA", at: CGPoint(x: tape.midX + 0.4, y: baroY + 0.2), size: Style.small,
-                               Boeing.green, anchor: .leading)
+            context.boeingText(baro.inHg ? "IN" : "HPA", at: CGPoint(x: tape.midX + 0.4, y: baroY + 0.2),
+                               size: Style.small, Boeing.green, anchor: .leading)
         }
     }
 

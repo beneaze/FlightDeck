@@ -1,9 +1,13 @@
 import SwiftUI
 import CoreLocation
 
-/// A320 Navigation Display in ARC mode: the aircraft sits low in the sector,
-/// the compass rose arcs across the top, and the flight plan runs away from
-/// the aircraft between dashed range arcs.
+/// A320 Navigation Display, in the mode the EFIS panel selects:
+/// - ARC: the aircraft low in the sector, the compass rose arcing across the
+///   top, the flight plan running away between dashed range arcs;
+/// - ROSE NAV: the full rose round the aircraft, the map all round it;
+/// - ROSE LS / ROSE VOR: the full rose with the approach or VOR course
+///   pointer and its deviation bar instead of the map;
+/// - PLAN: north up, centred on the TO waypoint, the aircraft where it is.
 ///
 /// Like the PFD, the whole instrument is drawn into one canvas in our own
 /// 1000-unit layout (see ``ND``), then scaled to fit, so its proportions
@@ -14,14 +18,23 @@ struct NDView: View {
     @EnvironmentObject private var packs: FlightPackStore
     @StateObject private var terrain = NDTerrainLayer()
 
-    @State private var rangeIndex = AircraftProfile.a320.ndDefaultRangeIndex
-    /// Non-zero while the display is "recomputing" after a range change — the
-    /// real unit blanks the map for half a second and shows RANGE CHANGE.
+    /// Non-zero while the display is "recomputing" after a range or mode
+    /// change — the real unit blanks the map for half a second and shows
+    /// RANGE CHANGE or MODE CHANGE.
     @State private var rangeChangeCount = 0
+    @State private var modeChangeCount = 0
 
     var profile: AircraftProfile = .a320
 
+    private var af: AutoFlight { flightData.autoFlight }
+    private var mode: NDMode { af.ndMode }
+    /// The range set on the EFIS panel or with the range keys.
+    private var rangeIndex: Int { af.ndRangeIndex.clamped(to: 0...(profile.ndRangesNm.count - 1)) }
     private var rangeNm: Double { profile.ndRangesNm[rangeIndex] }
+    /// Nautical miles from the map's centre to the ring: the selected range
+    /// in ARC; in ROSE and PLAN the range is the ring's diameter.
+    private var mapRangeNm: Double { mode == .arc ? rangeNm : rangeNm / 2 }
+    private var isBlanked: Bool { rangeChangeCount > 0 || modeChangeCount > 0 }
 
     /// The route's ground profile from the aircraft out to the selected
     /// range, in nautical miles ahead.
@@ -55,7 +68,14 @@ struct NDView: View {
         }
         .background(EFIS.background)
         .onReceive(flightData.$location) { _ in updateTerrain() }
-        .onChange(of: rangeIndex) { updateTerrain() }
+        .onChange(of: rangeIndex) {
+            blank(range: true)
+            updateTerrain()
+        }
+        .onChange(of: mode) {
+            blank(range: false)
+            updateTerrain()
+        }
         .onChange(of: flightData.autoFlight.terrainOnND) { updateTerrain() }
     }
 
@@ -66,14 +86,23 @@ struct NDView: View {
         return routePlanner.destination == nil ? nil : routePlanner.elevationStatus
     }
 
-    /// Terrain shows in plane mode with the EFIS panel's terrain switch on
-    /// (the Airbus TERR ON ND pushbutton, the Boeing TERR switch).
-    private var showsTerrain: Bool { isFlying && flightData.autoFlight.terrainOnND }
+    /// Terrain shows in plane mode with the TERR ON ND pushbutton on, in
+    /// ARC and ROSE NAV.
+    private var showsTerrain: Bool { isFlying && af.terrainOnND && mode.showsTerrain }
 
     private func updateTerrain() {
         terrain.update(store: showsTerrain ? packs.activeTerrain : nil, location: flightData.location,
-                       upDeg: flightData.headingDeg, rangeNm: rangeNm, altitudeFt: flightData.altitudeFt,
+                       upDeg: flightData.headingDeg, rangeNm: mapRangeNm, altitudeFt: flightData.altitudeFt,
                        verticalSpeedFpm: flightData.verticalSpeedFpm)
+    }
+
+    /// Blank the map for the half second the real unit takes.
+    private func blank(range: Bool) {
+        if range { rangeChangeCount += 1 } else { modeChangeCount += 1 }
+        Task {
+            try? await Task.sleep(nanoseconds: 550_000_000)
+            if range { rangeChangeCount -= 1 } else { modeChangeCount -= 1 }
+        }
     }
 
     // MARK: Display
@@ -103,16 +132,26 @@ struct NDView: View {
                                 width: size.width / scale,
                                 height: size.height / scale)
 
+            let layout = NDLayout(mode: mode, bounds: bounds)
+
             // Layer order: terrain at the bottom, then the rose, map, the track
             // indication over the flight plan — so the line stays visible
             // with a route active — and the aircraft symbol on top.
-            drawTerrain(sector, bounds)
-            drawCompass(sector)
-            drawRangeArcs(sector, bounds)
-            drawMap(sector, bounds)
-            drawTrackIndication(sector)
-            drawSelectedHeading(sector, bounds)
-            drawAirplane(sector)
+            drawTerrain(sector, bounds, layout)
+            drawCompass(sector, layout)
+            drawRangeRings(sector, bounds, layout)
+            if isBlanked || flightData.location == nil {
+                drawMapAnnunciation(sector, layout)
+            } else if mode.showsMap {
+                drawMap(sector, bounds, layout)
+            } else {
+                drawRadioCourse(sector, bounds, layout)
+            }
+            if mode != .plan {
+                drawTrackIndication(sector, layout)
+                drawSelectedHeading(sector, bounds, layout)
+            }
+            drawAirplane(sector, layout)
             drawTerrainReadout(sector, bounds)
 
             // Data blocks anchor to the display corners, not to the sector.
@@ -124,7 +163,7 @@ struct NDView: View {
             var right = ctx
             right.translateBy(x: size.width - ND.canvas * scale, y: 0)
             right.scaleBy(x: scale, y: scale)
-            drawToWaypoint(right)
+            if mode.showsMap { drawToWaypoint(right) } else { drawRadioBlock(right) }
 
             if routePlanner.destination == nil, let error = routePlanner.errorMessage {
                 text(sector, error, x: ND.center.x, y: bounds.maxY - ND.fontSmallest,
@@ -135,40 +174,97 @@ struct NDView: View {
 
     // MARK: Compass rose
 
-    private func drawCompass(_ context: GraphicsContext) {
+    private func drawCompass(_ context: GraphicsContext, _ layout: NDLayout) {
+        if layout.mode == .plan { drawPlanCompass(context, layout); return }
         let ctx = context
         let heading = flightData.headingDeg
+        let r = layout.ringRadius
 
-        // The visible part of the heading ring, running a little past the
-        // last graduation either side.
-        var ring = Path()
-        for step in stride(from: -ND.ringSpanDeg, through: ND.ringSpanDeg, by: 1.5) {
-            let p = ND.point(bearingDeg: step, radius: ND.ringRadius)
-            step == -ND.ringSpanDeg ? ring.move(to: p) : ring.addLine(to: p)
+        // ARC: the visible part of the heading ring, running a little past
+        // the last graduation either side. ROSE: the whole ring.
+        if layout.isArc {
+            var ring = Path()
+            for step in stride(from: -ND.ringSpanDeg, through: ND.ringSpanDeg, by: 1.5) {
+                let p = layout.point(bearingDeg: step, radius: r)
+                step == -ND.ringSpanDeg ? ring.move(to: p) : ring.addLine(to: p)
+            }
+            ctx.stroke(ring, with: .color(.white), lineWidth: ND.lineWidth)
+        } else {
+            ctx.stroke(layout.ringPath, with: .color(.white), lineWidth: ND.lineWidth)
         }
-        ctx.stroke(ring, with: .color(.white), lineWidth: ND.lineWidth)
 
-        // A graduation every 5°, long at the tens. The tens carry their
-        // heading in tens of degrees, rotating with the rose; every third one
-        // (the 30° marks) is set large.
+        // A graduation every 5°, long at the tens, rotating with the rose.
+        // ARC labels every ten, the 30° ones large; the full rose labels
+        // every 30°, the cardinal points large.
+        let tickSpan = layout.isArc ? ND.tickSpanDeg : 180
         for deg in stride(from: 0, to: 360, by: 5) {
             let diff = angularDifference(Double(deg), heading)
-            guard abs(diff) <= ND.tickSpanDeg else { continue }
+            guard abs(diff) <= tickSpan else { continue }
 
             var tick = ctx
-            tick.translateBy(x: ND.center.x, y: ND.center.y)
+            tick.translateBy(x: layout.center.x, y: layout.center.y)
             tick.rotate(by: .degrees(diff))
 
             let major = deg % 10 == 0
-            tick.line(from: CGPoint(x: 0, y: -ND.ringRadius),
-                      to: CGPoint(x: 0, y: -ND.ringRadius - (major ? ND.majorTick : ND.minorTick)),
+            tick.line(from: CGPoint(x: 0, y: -r),
+                      to: CGPoint(x: 0, y: -r - (major ? layout.majorTick : layout.minorTick)),
                       .white, width: ND.lineWidth)
 
-            if major {
-                let size = deg % 30 == 0 ? ND.roseLabelLarge : ND.roseLabelSmall
-                tick.digits("\(deg / 10)", at: CGPoint(x: 0, y: -ND.labelRadius),
-                            size: size, .white)
+            let labelled = layout.isArc ? major : deg % 30 == 0
+            if labelled {
+                let large = layout.isArc ? deg % 30 == 0 : deg % 90 == 0
+                tick.digits("\(deg / 10)", at: CGPoint(x: 0, y: -layout.labelRadius),
+                            size: large ? layout.labelLarge : layout.labelSmall, .white)
             }
+        }
+
+        // The full rose's fixed marks: a small white triangle on the ring
+        // every 45° from the lubber line, pointing in.
+        guard !layout.isArc else { return }
+        for bearing in stride(from: 45.0, to: 360, by: 45) {
+            var mark = ctx
+            mark.translateBy(x: layout.center.x, y: layout.center.y)
+            mark.rotate(by: .degrees(bearing))
+            let h = layout.majorTick * 0.8, w = layout.majorTick * 0.4
+            var triangle = Path()
+            triangle.move(to: CGPoint(x: 0, y: -r + 1))
+            triangle.addLine(to: CGPoint(x: -w, y: -r - h))
+            triangle.addLine(to: CGPoint(x: w, y: -r - h))
+            triangle.closeSubpath()
+            mark.fill(triangle, with: .color(.white))
+        }
+    }
+
+    /// PLAN: north up, the ring with the four cardinal points marked inside
+    /// it, upright.
+    private func drawPlanCompass(_ context: GraphicsContext, _ layout: NDLayout) {
+        let r = layout.ringRadius
+        context.stroke(layout.ringPath, with: .color(.white), lineWidth: ND.lineWidth)
+        for (deg, letter) in [(0.0, "N"), (90.0, "E"), (180.0, "S"), (270.0, "W")] {
+            context.line(from: layout.point(bearingDeg: deg, radius: r),
+                         to: layout.point(bearingDeg: deg, radius: r - layout.majorTick),
+                         .white, width: ND.lineWidth)
+            let at = layout.point(bearingDeg: deg, radius: r - layout.majorTick - layout.labelLarge * 0.75)
+            text(context, letter, x: at.x, y: at.y, size: layout.labelLarge, .white, anchor: .center)
+        }
+    }
+
+    private func drawRangeRings(_ context: GraphicsContext, _ bounds: CGRect, _ layout: NDLayout) {
+        guard !layout.isArc else { drawRangeArcs(context, bounds); return }
+        // ROSE and PLAN: a dashed ring at half the radius. Each ring's
+        // distance — a quarter of the range on the inner one, half on the
+        // ring — is written once, just inside it, low on the left.
+        let r = layout.ringRadius
+        let radius = r / 2
+        let circle = Path(ellipseIn: CGRect(x: layout.center.x - radius, y: layout.center.y - radius,
+                                            width: radius * 2, height: radius * 2))
+        let dash = r * 0.03
+        context.stroke(circle, with: .color(.white),
+                       style: StrokeStyle(lineWidth: ND.lineWidth, dash: [dash, dash]))
+        let size = r * 0.075
+        for (ring, value) in [(radius, rangeNm / 4), (r, rangeNm / 2)] {
+            let at = layout.point(bearingDeg: 225, radius: ring - r * 0.085)
+            text(context, rangeLabel(value), x: at.x, y: at.y, size: size, EFIS.cyan, anchor: .center)
         }
     }
 
@@ -209,7 +305,7 @@ struct NDView: View {
     /// above it the highest and lowest terrain elevations of the picture in
     /// hundreds of feet, each in the colour of its band.
     private func drawTerrainReadout(_ context: GraphicsContext, _ bounds: CGRect) {
-        guard showsTerrain, packs.activeTerrain != nil, rangeChangeCount == 0,
+        guard showsTerrain, packs.activeTerrain != nil, !isBlanked,
               flightData.location != nil else { return }
         let x = bounds.maxX - 24
         var y = bounds.maxY - ND.fontSmallest
@@ -239,21 +335,23 @@ struct NDView: View {
     /// among the graduations, its point on the heading — shown only while a
     /// heading is selected (HDG); managed NAV shows none. When the heading
     /// lies beyond the visible part of the arc, its value is written in cyan
-    /// at the end of the arc on that side instead.
-    private func drawSelectedHeading(_ context: GraphicsContext, _ bounds: CGRect) {
+    /// at the end of the arc on that side instead; the full rose always
+    /// shows it.
+    private func drawSelectedHeading(_ context: GraphicsContext, _ bounds: CGRect, _ layout: NDLayout) {
         guard let selected = flightData.autoFlight.selectedHeadingDeg else { return }
         let diff = angularDifference(selected, flightData.headingDeg)
 
         // The arc's visible end: where the ring leaves the display sides.
         let halfWidth = bounds.width / 2 - ND.selectedHeadingEdgeMargin
-        let visibleDeg = min(ND.tickSpanDeg,
-                             asin(Double(min(1, max(0, halfWidth / ND.ringRadius)))) * 180 / .pi)
+        let visibleDeg = layout.isArc
+            ? min(ND.tickSpanDeg, asin(Double(min(1, max(0, halfWidth / ND.ringRadius)))) * 180 / .pi)
+            : 180
 
         if abs(diff) <= visibleDeg {
             var bug = context
-            bug.translateBy(x: ND.center.x, y: ND.center.y)
+            bug.translateBy(x: layout.center.x, y: layout.center.y)
             bug.rotate(by: .degrees(diff))
-            let r = ND.ringRadius, h = ND.selectedHeadingHeight, w = ND.selectedHeadingHalfWidth
+            let r = layout.ringRadius, h = ND.selectedHeadingHeight, w = ND.selectedHeadingHalfWidth
             var triangle = Path()
             triangle.move(to: CGPoint(x: 0, y: -r))
             triangle.addLine(to: CGPoint(x: -w, y: -r - h))
@@ -276,11 +374,12 @@ struct NDView: View {
     /// Green track line from the rose centre out to the ring, with a diamond
     /// riding the ring — where the aircraft is actually going, as opposed to
     /// where it is pointing.
-    private func drawTrackIndication(_ context: GraphicsContext) {
+    private func drawTrackIndication(_ context: GraphicsContext, _ layout: NDLayout) {
         let diff = angularDifference(flightData.trackDeg, flightData.headingDeg)
+        let ringRadius = layout.ringRadius
 
         var ctx = context
-        ctx.translateBy(x: ND.center.x, y: ND.center.y)
+        ctx.translateBy(x: layout.center.x, y: layout.center.y)
         ctx.rotate(by: .degrees(diff))
 
         // The track line, as on the real ND, only while a heading is
@@ -288,9 +387,11 @@ struct NDView: View {
         // managed NAV the flight-plan line takes its place and only the
         // diamond shows. It stops where the lubber line begins, so the two
         // never overlap when track and heading agree.
-        if flightData.autoFlight.isHeadingSelected || routePlanner.destination == nil {
+        // ROSE LS and ROSE VOR draw no track line: the course pointer is
+        // the reference there.
+        if mode.showsMap && (flightData.autoFlight.isHeadingSelected || routePlanner.destination == nil) {
             var line = Path()
-            line.move(to: CGPoint(x: 0, y: -(ND.ringRadius - ND.lubberHalfLength)))
+            line.move(to: CGPoint(x: 0, y: -(ringRadius - ND.lubberHalfLength)))
             line.addLine(to: .zero)
             ctx.stroke(line, with: .color(EFIS.background),
                        style: StrokeStyle(lineWidth: ND.lineWidth * 1.5, lineCap: .round))
@@ -298,11 +399,11 @@ struct NDView: View {
                        style: StrokeStyle(lineWidth: ND.lineWidth * 1.25, lineCap: .round))
         }
 
-        // The diamond hangs from the ring, and disappears once the drift
-        // angle would carry it off the visible sector.
-        guard abs(diff) <= 40 else { return }
+        // The diamond hangs from the ring, and in ARC disappears once the
+        // drift angle would carry it off the visible sector.
+        guard abs(diff) <= 40 || !layout.isArc else { return }
         let height: CGFloat = 26, halfWidth: CGFloat = 8
-        let top = -ND.ringRadius
+        let top = -ringRadius
         var diamond = Path()
         diamond.move(to: CGPoint(x: 0, y: top))
         diamond.addLine(to: CGPoint(x: -halfWidth, y: top + height / 2))
@@ -317,44 +418,58 @@ struct NDView: View {
 
     // MARK: Map
 
-    /// Annunciations replacing the map sit in the middle of the sector.
-    private var sectorMidY: CGFloat { ND.center.y - ND.ringRadius * 0.6 }
+    /// Annunciations replacing the map sit in the middle of the sector, or
+    /// above the aircraft in the full rose.
+    private func annunciationY(_ layout: NDLayout) -> CGFloat {
+        layout.isArc ? ND.center.y - ND.ringRadius * 0.6 : layout.center.y - layout.ringRadius * 0.4
+    }
+
+    /// MAP NOT AVAIL without a position; RANGE CHANGE or MODE CHANGE while
+    /// the new picture is computed.
+    private func drawMapAnnunciation(_ context: GraphicsContext, _ layout: NDLayout) {
+        let y = annunciationY(layout)
+        if flightData.location == nil {
+            text(context, "MAP NOT AVAIL", x: layout.center.x, y: y, size: ND.fontLarge, EFIS.red, anchor: .center)
+        } else if modeChangeCount > 0 {
+            text(context, "MODE CHANGE", x: layout.center.x, y: y, size: ND.fontIntermediate, EFIS.green,
+                 anchor: .center)
+        } else {
+            text(context, "RANGE CHANGE", x: layout.center.x, y: y, size: ND.fontIntermediate, EFIS.green,
+                 anchor: .center)
+        }
+    }
+
+    /// The map's projection: heading up about the aircraft in ARC and ROSE;
+    /// in PLAN north up about the TO waypoint (the aircraft's position when
+    /// there is none), as the real PLAN centres on the waypoint the MCDU's
+    /// F-PLN page shows second.
+    private func mapGeometry(_ layout: NDLayout, location: CLLocation) -> NDGeometry {
+        if layout.mode == .plan {
+            return NDGeometry(apex: layout.center, radius: layout.mapRadius, rangeNm: mapRangeNm,
+                              origin: routePlanner.toWaypoint?.coordinate ?? location.coordinate, headingDeg: 0)
+        }
+        return NDGeometry(apex: layout.planeCenter, radius: layout.mapRadius, rangeNm: mapRangeNm,
+                          origin: location.coordinate, headingDeg: flightData.headingDeg)
+    }
 
     /// The terrain picture: the bottom layer of the display, so the rose,
     /// range arcs, route, symbols and every label stay drawn over it.
-    private func drawTerrain(_ context: GraphicsContext, _ bounds: CGRect) {
-        guard showsTerrain, rangeChangeCount == 0, let location = flightData.location else { return }
+    private func drawTerrain(_ context: GraphicsContext, _ bounds: CGRect, _ layout: NDLayout) {
+        guard showsTerrain, !isBlanked, let location = flightData.location else { return }
         var ctx = context
-        ctx.clip(to: ND.mapClip(in: bounds))
-        let g = NDGeometry(apex: ND.planeCenter, radius: ND.mapRadius,
-                           rangeNm: rangeNm, origin: location.coordinate,
-                           headingDeg: flightData.headingDeg)
-        terrain.draw(in: ctx, geometry: g, clipCenter: ND.center, clipRadius: ND.ringRadius,
-                     sweepOrigin: ND.planeCenter)
+        ctx.clip(to: layout.mapClip(in: bounds))
+        terrain.draw(in: ctx, geometry: mapGeometry(layout, location: location),
+                     clipCenter: layout.center, clipRadius: layout.ringRadius,
+                     sweepOrigin: layout.planeCenter, aheadOnly: layout.isArc)
     }
 
-    private func drawMap(_ context: GraphicsContext, _ bounds: CGRect) {
-        guard let location = flightData.location else {
-            text(context, "MAP NOT AVAIL", x: ND.center.x, y: sectorMidY, size: ND.fontLarge,
-                 EFIS.red, anchor: .center)
-            return
-        }
-
-        // While the new scale is computed the map blanks and the annunciation
-        // shows in the middle of the sector.
-        guard rangeChangeCount == 0 else {
-            text(context, "RANGE CHANGE", x: ND.center.x, y: sectorMidY, size: ND.fontIntermediate,
-                 EFIS.green, anchor: .center)
-            return
-        }
+    private func drawMap(_ context: GraphicsContext, _ bounds: CGRect, _ layout: NDLayout) {
+        guard let location = flightData.location else { return }
 
         var ctx = context
-        ctx.clip(to: ND.mapClip(in: bounds))
+        ctx.clip(to: layout.mapClip(in: bounds))
 
-        let g = NDGeometry(apex: ND.planeCenter, radius: ND.mapRadius,
-                           rangeNm: rangeNm, origin: location.coordinate,
-                           headingDeg: flightData.headingDeg)
-
+        let g = mapGeometry(layout, location: location)
 
         // The not-yet-flown part of the plan; sequenced legs disappear behind.
         // Airbus draws the whole active flight plan, active leg included, in
@@ -374,20 +489,13 @@ struct NDView: View {
         // With no computed route, the direct-to leg is the active flight plan.
         if routePlanner.routeCoordinates.count < 2, let waypoint = routePlanner.waypoints.first {
             var leg = Path()
-            leg.move(to: g.apex)
+            leg.move(to: g.project(location.coordinate))
             leg.addLine(to: g.project(waypoint.coordinate))
             ctx.stroke(leg, with: .color(EFIS.green), style: routeStyle)
         }
 
-        // Other airports (the ARPT option): magenta stars, the idents kept
-        // off the flight-plan line.
-        if isFlying {
-            let planned = Set(routePlanner.flightPlan.map { [$0.origin.icao, $0.destination.icao] } ?? [])
-            for airport in g.airportsInView(excluding: planned) {
-                drawAirportSymbol(ctx, at: g.project(airport.coordinate), ident: airport.icao,
-                                  color: EFIS.magenta, avoiding: routePoints)
-            }
-        }
+        // The map option lit on the EFIS panel, in magenta under the plan.
+        if isFlying { drawMapOption(ctx, g, routePoints: routePoints) }
 
         // The flight plan's own airports and runways, in white.
         drawPlanRunwaysAndAirports(ctx, g, routePoints: routePoints)
@@ -399,7 +507,14 @@ struct NDView: View {
             let at = g.project(point.coordinate)
             switch point.kind {
             case .fix:
-                if let constraint = point.constraintFt { drawConstraintCircle(ctx, at: at, constraintFt: constraint) }
+                if let constraint = point.constraintFt {
+                    drawConstraintCircle(ctx, at: at, constraintFt: constraint)
+                    // CSTR: the constraint's value under the ident.
+                    if af.ndOption == .constraints {
+                        text(ctx, constraintText(constraint), x: at.x + 2.3 * ND.waypointHalf,
+                             y: at.y + 1.5 * ND.waypointHalf + ND.fontMap * 1.05, size: ND.fontMap, EFIS.magenta)
+                    }
+                }
                 drawWaypointSymbol(ctx, at: at, ident: point.ident,
                                    color: point.isActive ? .white : EFIS.green)
             case .topOfClimb:
@@ -419,6 +534,68 @@ struct NDView: View {
                 break // drawn with the plan's airports
             }
         }
+    }
+
+    // MARK: Map options
+
+    /// What the lit option pushbutton adds: other airports (ARPT), VORs and
+    /// DMEs (VOR.D), NDBs (NDB) or the database's enroute waypoints (WPT,
+    /// from imported X-Plane data). CSTR is drawn with the plan's fixes.
+    private func drawMapOption(_ context: GraphicsContext, _ g: NDGeometry, routePoints: [CGPoint]) {
+        let searchNm = g.rangeNm * 1.3
+        switch af.ndOption {
+        case .airports:
+            let planned = Set(routePlanner.flightPlan.map { [$0.origin.icao, $0.destination.icao] } ?? [])
+            for airport in g.airportsInView(excluding: planned) {
+                drawAirportSymbol(context, at: g.project(airport.coordinate), ident: airport.icao,
+                                  color: EFIS.magenta, avoiding: routePoints)
+            }
+        case .vorDme, .ndb:
+            let wantNDB = af.ndOption == .ndb
+            for navaid in NavDatabase.shared.navaids(near: g.origin, withinNm: searchNm)
+            where navaid.kind.isNDB == wantNDB {
+                drawNavaidSymbol(context, at: g.project(navaid.coordinate), navaid: navaid)
+            }
+        case .waypoints:
+            // Enroute fixes are dense: up to the 80 NM range only.
+            guard g.rangeNm <= 80 else { return }
+            for fix in XPlaneNavData.shared.enrouteFixes(near: g.origin, withinNm: searchNm).prefix(400) {
+                drawWaypointSymbol(context, at: g.project(fix.coordinate), ident: fix.ident, color: EFIS.magenta)
+            }
+        case .constraints, nil:
+            break
+        }
+    }
+
+    /// Our own navaid symbols, after the Airbus set: a cross for a VOR, the
+    /// cross in a circle with a DME, a circle for a DME alone, a triangle
+    /// for an NDB; the ident below right.
+    private func drawNavaidSymbol(_ context: GraphicsContext, at: CGPoint, navaid: Navaid) {
+        let r = ND.waypointHalf * 1.3
+        var p = Path()
+        switch navaid.kind {
+        case .ndb, .ndbDme:
+            p.move(to: CGPoint(x: at.x, y: at.y - r))
+            p.addLine(to: CGPoint(x: at.x + r * 0.95, y: at.y + r * 0.7))
+            p.addLine(to: CGPoint(x: at.x - r * 0.95, y: at.y + r * 0.7))
+            p.closeSubpath()
+        case .dme:
+            p.addEllipse(in: CGRect(x: at.x - r * 0.8, y: at.y - r * 0.8, width: r * 1.6, height: r * 1.6))
+        case .vor, .vorDme, .vortac, .tacan:
+            p.move(to: CGPoint(x: at.x - r, y: at.y)); p.addLine(to: CGPoint(x: at.x + r, y: at.y))
+            p.move(to: CGPoint(x: at.x, y: at.y - r)); p.addLine(to: CGPoint(x: at.x, y: at.y + r))
+            if navaid.kind != .vor {
+                p.addEllipse(in: CGRect(x: at.x - r * 0.62, y: at.y - r * 0.62, width: r * 1.24, height: r * 1.24))
+            }
+        }
+        context.stroke(p, with: .color(EFIS.background), lineWidth: ND.routeWidth * 1.85)
+        context.stroke(p, with: .color(EFIS.magenta), lineWidth: ND.routeWidth)
+        text(context, navaid.ident, x: at.x + 1.5 * r, y: at.y + 1.2 * r, size: ND.fontMap, EFIS.magenta)
+    }
+
+    /// A constraint as the MCDU writes it: a flight level from 10 000 ft.
+    private func constraintText(_ feet: Double) -> String {
+        feet >= 10_000 ? "FL" + String(format: "%03d", Int((feet / 100).rounded())) : "\(Int(feet.rounded()))"
     }
 
     // MARK: Flight-plan airports and runways
@@ -563,31 +740,229 @@ struct NDView: View {
 
     // MARK: Aircraft symbol
 
-    private func drawAirplane(_ context: GraphicsContext) {
+    private func drawAirplane(_ context: GraphicsContext, _ layout: NDLayout) {
+        var ctx = context
+        if layout.mode == .plan {
+            // PLAN: the aircraft where it is on the north-up map, pointing
+            // along its heading.
+            guard let location = flightData.location else { return }
+            let at = mapGeometry(layout, location: location).project(location.coordinate)
+            ctx.translateBy(x: at.x, y: at.y)
+            ctx.rotate(by: .degrees(flightData.headingDeg))
+        } else {
+            ctx.translateBy(x: layout.planeCenter.x, y: layout.planeCenter.y)
+        }
+
         // Wings, fuselage and tailplane as three strokes of one path.
-        let c = ND.planeCenter
         typealias A = ND.Airplane
         var plane = Path()
-        plane.move(to: CGPoint(x: c.x - A.wingHalfSpan, y: c.y))
-        plane.addLine(to: CGPoint(x: c.x + A.wingHalfSpan, y: c.y))
-        plane.move(to: CGPoint(x: c.x, y: c.y - A.nose))
-        plane.addLine(to: CGPoint(x: c.x, y: c.y + A.tail))
-        plane.move(to: CGPoint(x: c.x - A.tailplaneHalfSpan, y: c.y + A.tailplaneAt))
-        plane.addLine(to: CGPoint(x: c.x + A.tailplaneHalfSpan, y: c.y + A.tailplaneAt))
-        context.stroke(plane, with: .color(EFIS.background),
-                       style: StrokeStyle(lineWidth: ND.symbolWidth * 1.6, lineCap: .round))
-        context.stroke(plane, with: .color(EFIS.yellow),
-                       style: StrokeStyle(lineWidth: ND.symbolWidth, lineCap: .round))
+        plane.move(to: CGPoint(x: -A.wingHalfSpan, y: 0))
+        plane.addLine(to: CGPoint(x: A.wingHalfSpan, y: 0))
+        plane.move(to: CGPoint(x: 0, y: -A.nose))
+        plane.addLine(to: CGPoint(x: 0, y: A.tail))
+        plane.move(to: CGPoint(x: -A.tailplaneHalfSpan, y: A.tailplaneAt))
+        plane.addLine(to: CGPoint(x: A.tailplaneHalfSpan, y: A.tailplaneAt))
+        ctx.stroke(plane, with: .color(EFIS.background),
+                   style: StrokeStyle(lineWidth: ND.symbolWidth * 1.6, lineCap: .round))
+        ctx.stroke(plane, with: .color(EFIS.yellow),
+                   style: StrokeStyle(lineWidth: ND.symbolWidth, lineCap: .round))
 
+        guard layout.mode != .plan else { return }
         // Yellow lubber line, fixed across the top of the ring.
-        let ringTop = ND.center.y - ND.ringRadius
+        let ringTop = layout.center.y - layout.ringRadius
         var lubber = Path()
-        lubber.move(to: CGPoint(x: ND.center.x, y: ringTop - ND.lubberHalfLength))
-        lubber.addLine(to: CGPoint(x: ND.center.x, y: ringTop + ND.lubberHalfLength))
+        lubber.move(to: CGPoint(x: layout.center.x, y: ringTop - ND.lubberHalfLength))
+        lubber.addLine(to: CGPoint(x: layout.center.x, y: ringTop + ND.lubberHalfLength))
         context.stroke(lubber, with: .color(EFIS.background),
                        style: StrokeStyle(lineWidth: ND.symbolWidth * 1.1, lineCap: .round))
         context.stroke(lubber, with: .color(EFIS.yellow),
                        style: StrokeStyle(lineWidth: ND.symbolWidth, lineCap: .round))
+    }
+
+    // MARK: ROSE LS and ROSE VOR
+
+    /// The course ROSE LS or ROSE VOR shows. There is no radio receiver on
+    /// a phone, so both are worked out from the position:
+    /// - LS: the approach runway's localiser — the course along the runway,
+    ///   the deviation as seen from its far end, 0.8° a dot — and a 3° glide
+    ///   path to the threshold;
+    /// - VOR: the first VOR on the plan from the TO waypoint on (else the TO
+    ///   waypoint itself), the course the leg into it, 5° a dot.
+    private struct RadioCourse {
+        let label: String
+        let frequency: String?
+        let ident: String
+        /// Course, degrees true like everything else on the map.
+        let courseDeg: Double
+        /// Dots, positive with the course lying to the right; nil out of range.
+        let deviationDots: Double?
+        /// VOR: whether the station lies behind.
+        let isFrom: Bool
+        /// LS: the glide path, in dots, positive with the path below.
+        let glideDots: Double?
+        let color: Color
+    }
+
+    private var radioCourse: RadioCourse? {
+        guard let location = flightData.location else { return nil }
+        let here = location.coordinate
+        func bearing(_ from: CLLocationCoordinate2D, _ to: CLLocationCoordinate2D) -> (bearingDeg: Double, distanceNm: Double) {
+            NDGeometry(apex: .zero, radius: 1, rangeNm: 1, origin: from, headingDeg: 0).vector(to: to)
+        }
+
+        if mode == .roseLS {
+            guard let plan = routePlanner.flightPlan, let runway = plan.approachRunway else { return nil }
+            let antenna = GreatCircle.destination(from: runway.coordinate, courseDeg: runway.headingDeg,
+                                                  distanceNm: max(runway.lengthNm, 0.5))
+            let toAntenna = bearing(here, antenna)
+            let deviation = angularDifference(toAntenna.bearingDeg, runway.headingDeg)
+            let inRange = toAntenna.distanceNm <= 25 && abs(deviation) <= 35
+            let glide = Guidance(flightData: flightData, routePlanner: routePlanner).glideDeviation
+            return RadioCourse(label: "ILS1", frequency: nil, ident: runway.fixIdent,
+                               courseDeg: runway.headingDeg,
+                               deviationDots: inRange ? deviation / 0.8 : nil, isFrom: false,
+                               glideDots: inRange ? glide.map { $0 * 2 } : nil, color: EFIS.magenta)
+        }
+
+        // ROSE VOR.
+        guard let first = routePlanner.toWaypointIndex else { return nil }
+        let waypoints = routePlanner.waypoints
+        let candidates = waypoints.indices.filter { $0 >= first }.prefix(12)
+        func vor(at index: Int) -> Navaid? {
+            NavDatabase.shared.navaids(waypoints[index].ident, near: waypoints[index].coordinate).first {
+                $0.kind.isVOR && GreatCircle.distanceNm($0.coordinate, waypoints[index].coordinate) < 1
+            }
+        }
+        let found = candidates.lazy.compactMap { i in vor(at: i).map { (i, $0) } }.first
+        let index = found?.0 ?? first
+        let station = found?.1.coordinate ?? waypoints[index].coordinate
+        let previous = index > 0 ? waypoints[index - 1].coordinate : routePlanner.flightPlan?.origin.coordinate
+        let toStation = bearing(here, station)
+        let course = previous.map { bearing($0, station).bearingDeg } ?? toStation.bearingDeg
+        var deviation = angularDifference(toStation.bearingDeg, course)
+        let isFrom = abs(deviation) > 90
+        if isFrom { deviation = angularDifference(course, normalizedHeading(toStation.bearingDeg + 180)) }
+        return RadioCourse(label: "VOR1", frequency: found?.1.frequencyText, ident: waypoints[index].ident,
+                           courseDeg: course, deviationDots: deviation / 5, isFrom: isFrom,
+                           glideDots: nil, color: EFIS.cyan)
+    }
+
+    /// ROSE LS and ROSE VOR, round the aircraft: a circle of short marks
+    /// a dot out; the deviation dots, one and two dots either side across
+    /// the course, the outer pair on the inner range ring; the course
+    /// pointer — its head from the ring to the inner part of the rose with
+    /// a crossbar, its tail opposite with a short one — and between them
+    /// the deviation bar, with the TO / FROM chevron beside it in ROSE VOR.
+    /// In ROSE LS the glide scale stands at the right.
+    private func drawRadioCourse(_ context: GraphicsContext, _ bounds: CGRect, _ layout: NDLayout) {
+        let r = layout.ringRadius, dot = layout.dotSpacing
+        let c = layout.center
+
+        for bearing in stride(from: 0.0, to: 360, by: 30) {
+            context.line(from: layout.point(bearingDeg: bearing, radius: dot * 0.86),
+                         to: layout.point(bearingDeg: bearing, radius: dot * 1.08), .white, width: ND.lineWidth)
+        }
+
+        guard let course = radioCourse else { return }
+        var ctx = context
+        ctx.translateBy(x: c.x, y: c.y)
+        ctx.rotate(by: .degrees(angularDifference(course.courseDeg, flightData.headingDeg)))
+
+        let dotRadius = r * 0.022
+        for n: CGFloat in [-2, -1, 1, 2] {
+            ctx.stroke(Path(ellipseIn: CGRect(x: n * dot - dotRadius, y: -dotRadius,
+                                              width: 2 * dotRadius, height: 2 * dotRadius)),
+                       with: .color(.white), lineWidth: ND.lineWidth)
+        }
+
+        let inner = r * 0.37
+        var pointer = Path()
+        pointer.move(to: CGPoint(x: 0, y: -r))
+        pointer.addLine(to: CGPoint(x: 0, y: -inner))
+        pointer.move(to: CGPoint(x: -r * 0.08, y: -r * 0.5))
+        pointer.addLine(to: CGPoint(x: r * 0.08, y: -r * 0.5))
+        pointer.move(to: CGPoint(x: 0, y: inner))
+        pointer.addLine(to: CGPoint(x: 0, y: r))
+        pointer.move(to: CGPoint(x: -r * 0.04, y: r * 0.5))
+        pointer.addLine(to: CGPoint(x: r * 0.04, y: r * 0.5))
+        if let deviation = course.deviationDots {
+            let x = CGFloat(deviation.clamped(to: -2.2...2.2)) * dot
+            pointer.move(to: CGPoint(x: x, y: -inner))
+            pointer.addLine(to: CGPoint(x: x, y: inner))
+            // VOR: the chevron beside the bar towards the centre, past its
+            // tail end, pointing to the station — along the course for TO,
+            // back down it for FROM.
+            if mode == .roseVOR {
+                let cx = x - (x >= 0 ? 1 : -1) * r * 0.075
+                let cy = course.isFrom ? -r * 0.52 : r * 0.52
+                let arm = r * 0.05, back: CGFloat = course.isFrom ? -arm : arm
+                let tip = CGPoint(x: cx, y: cy - back)
+                pointer.move(to: CGPoint(x: cx - arm, y: tip.y + back))
+                pointer.addLine(to: tip)
+                pointer.addLine(to: CGPoint(x: cx + arm, y: tip.y + back))
+            }
+        }
+        let width = ND.lineWidth * 1.6
+        ctx.stroke(pointer, with: .color(EFIS.background),
+                   style: StrokeStyle(lineWidth: width * 2, lineCap: .round, lineJoin: .round))
+        ctx.stroke(pointer, with: .color(course.color),
+                   style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round))
+
+        guard mode == .roseLS else { return }
+        // The glide scale beside the rose, its diamond where the path is.
+        let x = min(c.x + layout.labelRadius + 60, bounds.maxX - 40)
+        for n: CGFloat in [-2, -1, 1, 2] {
+            context.stroke(Path(ellipseIn: CGRect(x: x - dotRadius, y: c.y + n * dot - dotRadius,
+                                                  width: 2 * dotRadius, height: 2 * dotRadius)),
+                           with: .color(.white), lineWidth: ND.lineWidth)
+        }
+        context.line(from: CGPoint(x: x - r * 0.06, y: c.y), to: CGPoint(x: x + r * 0.06, y: c.y),
+                     EFIS.yellow, width: ND.lineWidth * 1.5)
+        if let glide = course.glideDots {
+            let y = c.y + CGFloat(glide.clamped(to: -2.2...2.2)) * dot
+            let h = r * 0.06, w = r * 0.04
+            var diamond = Path()
+            diamond.move(to: CGPoint(x: x, y: y - h))
+            diamond.addLine(to: CGPoint(x: x + w, y: y))
+            diamond.addLine(to: CGPoint(x: x, y: y + h))
+            diamond.addLine(to: CGPoint(x: x - w, y: y))
+            diamond.closeSubpath()
+            context.stroke(diamond, with: .color(EFIS.magenta), lineWidth: ND.lineWidth * 1.4)
+        }
+    }
+
+    /// Top right in ROSE LS and ROSE VOR: the receiver and its frequency
+    /// (the decimals small), the course, the station's ident.
+    private func drawRadioBlock(_ context: GraphicsContext) {
+        let edge = ND.canvas - Self.blockMargin
+        let large = ND.advance(ND.fontIntermediate), small = ND.advance(ND.fontSmallest)
+        let course = radioCourse
+        let label = mode == .roseLS ? "ILS1" : "VOR1"
+
+        // Row 0: VOR1  115.10, the receiver's name in its own column.
+        var labelRight = edge
+        if let frequency = course?.frequency {
+            let parts = frequency.split(separator: ".", maxSplits: 1).map(String.init)
+            let decimals = parts.count > 1 ? "." + parts[1] : ""
+            text(context, decimals, x: edge, y: Self.row(0), size: ND.fontSmallest, .white, anchor: .trailing)
+            let wholeRight = edge - CGFloat(decimals.count) * small
+            text(context, parts[0], x: wholeRight, y: Self.row(0), size: ND.fontIntermediate, .white,
+                 anchor: .trailing)
+            labelRight = wholeRight - CGFloat(parts[0].count) * large - large
+        }
+        text(context, label, x: labelRight, y: Self.row(0), size: ND.fontIntermediate, .white, anchor: .trailing)
+
+        // Row 1: CRS 210°.
+        let crs = course.map { String(format: "%03d", Int($0.courseDeg.rounded()) % 360) } ?? "---"
+        text(context, "°", x: edge, y: Self.row(1), size: ND.fontIntermediate, EFIS.cyan, anchor: .trailing)
+        text(context, crs, x: edge - large, y: Self.row(1), size: ND.fontIntermediate, EFIS.cyan, anchor: .trailing)
+        text(context, "CRS", x: edge - 5 * large, y: Self.row(1), size: ND.fontSmallest, .white, anchor: .trailing)
+
+        // Row 2: the station — white for a VOR, magenta for the localiser.
+        if let course {
+            text(context, course.ident, x: edge, y: Self.row(2), size: ND.fontIntermediate,
+                 mode == .roseLS ? EFIS.magenta : .white, anchor: .trailing)
+        }
     }
 
     // MARK: Data blocks
@@ -743,15 +1118,11 @@ struct NDView: View {
         .background(EFIS.background)
     }
 
+    /// The range keys move the same range as the EFIS panel's selector;
+    /// the change blanks the map (see `onChange(of: rangeIndex)`).
     private func setRange(_ newIndex: Int) {
-        guard profile.ndRangesNm.indices.contains(newIndex), newIndex != rangeIndex
-        else { return }
-        rangeIndex = newIndex
-        rangeChangeCount += 1
-        Task {
-            try? await Task.sleep(nanoseconds: 550_000_000)
-            rangeChangeCount -= 1
-        }
+        guard profile.ndRangesNm.indices.contains(newIndex), newIndex != rangeIndex else { return }
+        flightData.autoFlight.ndRangeIndex = newIndex
     }
 }
 
