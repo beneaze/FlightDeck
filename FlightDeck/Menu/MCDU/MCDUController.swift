@@ -140,6 +140,8 @@ final class MCDUController: ObservableObject {
     // MARK: X-Plane navigation data
 
     @Published var isShowingImporter = false
+    /// The how-to guide, opened again from MENU.
+    @Published var isShowingGuide = false
     @Published private(set) var isImportingNavData = false
 
     /// Copy the X-Plane navigation data folder the user picked.

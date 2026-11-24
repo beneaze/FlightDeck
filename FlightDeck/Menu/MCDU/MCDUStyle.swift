@@ -15,6 +15,10 @@ struct MCDURun {
     var text: String
     var color: MCDUColor = .white
     var small = false
+    /// Entry boxes, one per character of `text`: an entry the page needs.
+    /// Drawn as shapes filling each character cell, as no glyph in the
+    /// screen's face is as wide as the real boxes.
+    var isBoxes = false
 }
 
 /// One of the screen's 24-column lines: text set from the left edge, from

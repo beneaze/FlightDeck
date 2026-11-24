@@ -356,7 +356,7 @@ FlightDeck/
 │   │   ├── MCDUFlightPlanPages.swift  F-PLN editing, departures, arrivals
 │   │   └── MCDUView.swift       The unit on screen
 │   ├── DestinationPickerView.swift  Map picker (MCDU MAP> prompt)
-│   └── SafetyNoticeView.swift   One-time safety notice
+│   └── WelcomeView.swift        First-start guide and safety notes (MENU → <HELP)
 ├── PFD/
 │   ├── PFDGeometry.swift        A320 PFD layout spec
 │   ├── PFDView.swift            A320 PFD composition

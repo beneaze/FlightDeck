@@ -452,17 +452,21 @@ struct PFDView: View {
         var clipped = context
         clipped.clip(to: Path(tape))
 
+        // As on the real scale: a graduation every 100 ft on the outboard
+        // edge, and every 500 ft the hundreds in three digits, set from the
+        // inboard edge. The level-off target writes its own value in its
+        // colour, so the white one under it is left out.
+        let target = altitudeTarget
         let visible = Double(tape.height / PFD.altScale) / 2
         var value = ((altitude - visible) / 100).rounded(.down) * 100
         while value <= altitude + visible {
             let ty = y(for: value)
-            let labelled = value.truncatingRemainder(dividingBy: 500) == 0
-            clipped.line(from: CGPoint(x: tape.minX, y: ty),
-                         to: CGPoint(x: tape.minX + (labelled ? 1.64 : 1.0), y: ty),
+            clipped.line(from: CGPoint(x: tape.maxX - PFD.altTickLength, y: ty),
+                         to: CGPoint(x: tape.maxX, y: ty),
                          .white, width: Style.thin)
-            if labelled {
+            if value.truncatingRemainder(dividingBy: 500) == 0, abs(value - target.value) >= 50 {
                 clipped.digits(String(format: "%03d", Int(value / 100)),
-                               at: CGPoint(x: tape.minX + 2.0, y: ty),
+                               at: CGPoint(x: PFD.altLabelX, y: ty),
                                size: Style.scaleType, .white, anchor: .leading)
             }
             value += 100
@@ -486,24 +490,28 @@ struct PFDView: View {
         drawAltitudeReadout(context, centerY: centerY, altitude: altitude)
     }
 
-    /// The level-off target on the scale: a box at the target, notched on
-    /// its inboard side where it points at the graduation, with the target's
-    /// hundreds inside — cyan when it is the FCU altitude, magenta when it is
-    /// a constraint the managed climb or descent will level at. Drawn before
-    /// the readout, so level at the target the readout covers it and only the
-    /// box's edges show around the window. Off the scale it gives way to the
+    /// The level-off target on the scale, as on the real PFD: a tall,
+    /// narrow box over the inboard part of the tape, notched on its inboard
+    /// edge where it points at the graduation, with the target's hundreds
+    /// in three digits where the scale's own labels sit — cyan for the FCU
+    /// altitude, magenta for a constraint the managed climb or descent will
+    /// level at. It is about twice the readout window's height, so level at
+    /// the target its top and bottom stand clear above and below the
+    /// window, which covers its middle. Off the scale it gives way to the
     /// value above or below the tape (see ``drawOfftapeReadouts``).
     private func drawAltitudeTarget(_ context: GraphicsContext, y: (Double) -> CGFloat) {
         let tape = PFD.altTape
         let target = altitudeTarget
         let ty = y(target.value)
-        guard tape.minY...tape.maxY ~= ty else { return }
+        let half = PFD.altTargetHalfHeight
+        guard ty + half > tape.minY, ty - half < tape.maxY else { return }
         let color = target.isManaged ? EFIS.magenta : EFIS.cyan
 
         var ctx = context
-        ctx.clip(to: Path(CGRect(x: tape.minX - 1.5, y: tape.minY, width: tape.width + 4, height: tape.height)))
-        let half: CGFloat = 3.4, notch: CGFloat = 1.1
-        let left = tape.minX - 0.6, right = tape.maxX + 1.0
+        ctx.clip(to: Path(CGRect(x: tape.minX - 2, y: tape.minY, width: tape.width + 2, height: tape.height)))
+        let notch = PFD.altTargetNotch
+        let left = tape.minX - PFD.altTargetOverhang
+        let right = tape.minX + PFD.altTargetWidth
         var box = Path()
         box.move(to: CGPoint(x: left, y: ty - half))
         box.addLine(to: CGPoint(x: right, y: ty - half))
@@ -513,10 +521,9 @@ struct PFDView: View {
         box.addLine(to: CGPoint(x: left + notch, y: ty))
         box.addLine(to: CGPoint(x: left, y: ty - notch))
         box.closeSubpath()
-        ctx.fill(box, with: .color(EFIS.tape))
         ctx.stroke(box, with: .color(color), lineWidth: Style.medium)
         ctx.digits(String(format: "%03d", Int((abs(target.value) / 100).rounded())),
-                   at: CGPoint(x: tape.minX + 2.0, y: ty), size: Style.scaleType + 0.3, color,
+                   at: CGPoint(x: PFD.altLabelX, y: ty), size: Style.scaleType, color,
                    weight: .bold, anchor: .leading)
     }
 

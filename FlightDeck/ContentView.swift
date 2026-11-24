@@ -23,7 +23,7 @@ struct ContentView: View {
         var id: Self { self }
     }
     @StateObject private var mcdu = MCDUController()
-    @AppStorage(SafetyNoticeView.acceptedKey) private var hasAcceptedSafetyNotice = false
+    @AppStorage(WelcomeView.seenKey) private var hasSeenWelcome = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -68,8 +68,9 @@ struct ContentView: View {
             )
         }
         .statusBarHidden(true)
-        .fullScreenCover(isPresented: Binding(get: { !hasAcceptedSafetyNotice }, set: { _ in })) {
-            SafetyNoticeView { hasAcceptedSafetyNotice = true }
+        // The guide, with the safety notes to accept, before the first use.
+        .fullScreenCover(isPresented: Binding(get: { !hasSeenWelcome }, set: { _ in })) {
+            WelcomeView(isBoeing: flightData.displayStyle == .boeing) { hasSeenWelcome = true }
         }
         // Every position update advances the flight plan — the aircraft's
         // projection onto the route, and the waypoints sequencing as they

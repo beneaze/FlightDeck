@@ -3,12 +3,12 @@
 Paste these into App Store Connect. Character limits are in brackets.
 
 ## Name [30]
-CockpitView
+CockpitView: In Flight PFD
 
-The app is named "CockpitView" on the App Store and on the home screen ("FlightDeck" was taken; the Xcode project and target keep the FlightDeck name). Bundle ID `com.flightdeck.efis`, SKU `flightdeck-efis`.
+The App Store name is "CockpitView: In Flight PFD"; the home screen shows "CockpitView". "FlightDeck", "CockpitView" and "JumpSeat" alone were taken. The Xcode project and target keep the FlightDeck name. Bundle ID `com.flightdeck.efis`, SKU `flightdeck-efis`.
 
 ## Subtitle [30]
-Pilots' view for passengers
+Jump Seat for Passengers
 
 ## Category
 Primary: Travel. Secondary: Entertainment.

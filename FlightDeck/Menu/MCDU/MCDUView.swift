@@ -61,6 +61,9 @@ struct MCDUView: View {
         .sheet(isPresented: $controller.isShowingMap) {
             DestinationPickerView { controller.close() }
         }
+        .fullScreenCover(isPresented: $controller.isShowingGuide) {
+            WelcomeView(isBoeing: controller.style.isBoeing, isReplay: true) { controller.isShowingGuide = false }
+        }
     }
 
     private var closeButton: some View {
@@ -185,11 +188,21 @@ struct MCDUView: View {
         .frame(height: row)
     }
 
-    private func text(_ runs: [MCDURun], _ s: MCDUStyle, font: CGFloat) -> Text {
-        runs.reduce(Text("")) { result, run in
-            result + Text(run.text)
-                .font(s.font(font, small: run.small))
-                .foregroundStyle(s.color(run.color))
+    private func text(_ runs: [MCDURun], _ s: MCDUStyle, font: CGFloat) -> some View {
+        HStack(alignment: .lastTextBaseline, spacing: 0) {
+            ForEach(runs.indices, id: \.self) { i in
+                let run = runs[i]
+                let size = run.small ? font * 0.76 : font
+                // Spaces set the width the boxes take, cell for cell.
+                Text(run.text)
+                    .font(s.font(font, small: run.small))
+                    .foregroundStyle(s.color(run.color))
+                    .overlay {
+                        if run.isBoxes {
+                            MCDUBoxes(count: run.text.count, color: s.color(run.color), fontSize: size)
+                        }
+                    }
+            }
         }
     }
 
@@ -354,5 +367,34 @@ private struct MCDUKeyStyle: ButtonStyle {
             )
             .brightness(configuration.isPressed && !drawsFace ? -0.15 : 0)
             .offset(y: configuration.isPressed ? 1 : 0)
+    }
+}
+
+/// The amber boxes of an entry the page needs: one outlined box per
+/// character cell, nearly as wide as the cell and as tall as a capital,
+/// with a hair of space between neighbours.
+struct MCDUBoxes: View {
+    let count: Int
+    let color: Color
+    let fontSize: CGFloat
+
+    var body: some View {
+        GeometryReader { geo in
+            let cell = geo.size.width / CGFloat(max(count, 1))
+            let line = max(1, fontSize * 0.085)
+            let height = fontSize * 0.74
+            HStack(spacing: 0) {
+                ForEach(0..<count, id: \.self) { _ in
+                    Rectangle()
+                        .strokeBorder(color, lineWidth: line)
+                        .frame(width: cell * 0.84, height: height)
+                        .frame(width: cell)
+                }
+            }
+            // Sit on the baseline like the capitals beside them.
+            .frame(height: geo.size.height, alignment: .center)
+            .offset(y: -fontSize * 0.03)
+        }
+        .accessibilityHidden(true)
     }
 }

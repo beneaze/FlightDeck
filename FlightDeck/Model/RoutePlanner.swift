@@ -92,7 +92,7 @@ final class RoutePlanner: ObservableObject {
     /// Car, bicycle or plane. Switching between car and bike with a
     /// destination active replans at once; switching to or from plane drops
     /// the route, as a flight plan and a road route have nothing in common.
-    @Published var transportMode: TransportMode = .car {
+    @Published var transportMode: TransportMode = .plane {
         didSet {
             UserDefaults.standard.set(transportMode.rawValue, forKey: Self.transportModeKey)
             guard transportMode != oldValue else { return }

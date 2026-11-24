@@ -76,7 +76,7 @@ extension MCDUController {
         [MCDURun(text: text, color: color, small: small)]
     }
     func boxes(_ count: Int) -> [MCDURun] {
-        [MCDURun(text: String(repeating: "▯", count: count), color: .amber)]
+        [MCDURun(text: String(repeating: " ", count: count), color: .amber, isBoxes: true)]
     }
     func action(_ text: String) -> [MCDURun] {
         [MCDURun(text: text, color: .white), MCDURun(text: "*", color: .amber)]
@@ -184,7 +184,7 @@ extension MCDUController {
             left: entry(.car), right: prompt(style.title(.route) + ">"))
         set(&rows, 1, left: entry(.bicycle), right: prompt(legs))
         set(&rows, 2, left: entry(.plane), right: prompt("PROG>"))
-        set(&rows, 3, right: prompt("SETTINGS>"))
+        set(&rows, 3, left: prompt("<HELP"), right: prompt("SETTINGS>"))
         set(&rows, 4, right: prompt("STORED FLT>"))
         set(&rows, 5, left: prompt("<DISPLAYS"), right: prompt("CREDITS>"))
         return titleRuns(style.title(.menu))
@@ -196,6 +196,7 @@ extension MCDUController {
             case 0: routePlanner.transportMode = .car
             case 1: routePlanner.transportMode = .bicycle
             case 2: routePlanner.transportMode = .plane
+            case 3: isShowingGuide = true
             case 5: close()
             default: break
             }

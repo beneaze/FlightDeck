@@ -232,6 +232,18 @@ enum PFD {
     }
     /// Display units per foot: the tape shows about ±570 ft.
     static var altScale: CGFloat { tapeHalfHeight / 570 }
+    /// The 100 ft graduations, on the tape's outboard edge.
+    static let altTickLength: CGFloat = 1.0
+    /// Where the scale's labels, and the target's value, start.
+    static var altLabelX: CGFloat { altTape.minX + 0.45 }
+    /// The level-off target box: about twice the readout window's height,
+    /// standing a little proud of the tape's inboard edge and reaching
+    /// about two fifths of the way across it, as measured off photos of
+    /// the real display.
+    static let altTargetHalfHeight: CGFloat = 5.9
+    static let altTargetOverhang: CGFloat = 0.9
+    static let altTargetWidth: CGFloat = 3.4
+    static let altTargetNotch: CGFloat = 0.85
 
     /// The ground reference: a red ribbon in the strip just outboard of the
     /// tape, between it and the V/S scale — the counterpart of the speed
